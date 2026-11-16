@@ -1,18 +1,13 @@
-"""Install vLLM at an exact commit into its own venv, from vLLM's per-commit wheels.
-
-Usage: python -m klgate.build <tag | branch | sha | bench/entries/<id>.toml> ...
-An entry file installs both of its builds. Prints each build's python.
-"""
+"""Install vLLM at an exact commit into its own venv, from vLLM's per-commit wheels."""
 
 import os
 import re
 import subprocess
 import sys
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from pathlib import Path
 
 BuildsDir = Path(os.environ.get("KLGATE_BUILDS", Path.home() / ".cache" / "klgate" / "builds"))
@@ -21,24 +16,6 @@ CommitApi = "https://api.github.com/repos/vllm-project/vllm/commits/{ref}"
 Python = "3.12"
 Sha = re.compile(r"[0-9a-f]{40}")
 Timeout = 60  # seconds per request
-
-
-def main() -> None:
-    if len(sys.argv) < 2:
-        print("usage: python -m klgate.build <tag | branch | sha | bench/entries/<id>.toml> ...", file=sys.stderr)
-        sys.exit(2)
-    todo = list(dict.fromkeys(sha for arg in sys.argv[1:] for sha in shas(arg)))
-    # Installs are network- and disk-bound; a few at a time keeps the mirror happy.
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        for python in pool.map(install, todo):
-            print(python, flush=True)
-
-
-def shas(arg: str) -> list[str]:
-    if arg.endswith(".toml"):
-        entry = tomllib.loads(Path(arg).read_text())
-        return [entry[k] for k in ("buggy", "fixed", "baseline", "candidate") if k in entry]
-    return [resolve(arg)]
 
 
 def resolve(ref: str) -> str:
@@ -56,18 +33,21 @@ def resolve(ref: str) -> str:
     return sha
 
 
-def install(sha: str) -> Path:
-    """The python of the build's venv, installing the build first if needed."""
+def install(sha: str, packages: Sequence[str] = ()) -> Path:
+    """The python of the build's venv, installing the build first if needed, then any
+    packages it needs pinned, such as a transformers that knows a newer model."""
     if not Sha.fullmatch(sha):
         sys.exit(f"need a full 40-character commit sha, got {sha!r}")
-    venv = BuildsDir / sha
+    # Pinned packages get their own venv, so a plain build stays plain.
+    venv = BuildsDir / "-".join([sha, *packages])
     python = venv / "bin" / "python"
-    if (venv / ".done").exists():
-        return python
-    wheel = find_wheel(sha)
-    subprocess.run(["uv", "venv", "-q", "--clear", "--python", Python, str(venv)], check=True)
-    subprocess.run(["uv", "pip", "install", "-q", "--python", str(python), wheel], check=True)
-    (venv / ".done").write_text(wheel + "\n")
+    if not (venv / ".done").exists():
+        wheel = find_wheel(sha)
+        subprocess.run(["uv", "venv", "-q", "--clear", "--python", Python, str(venv)], check=True)
+        subprocess.run(["uv", "pip", "install", "-q", "--python", str(python), wheel], check=True)
+        (venv / ".done").write_text(wheel + "\n")
+    if packages:
+        subprocess.run(["uv", "pip", "install", "-q", "--python", str(python), *packages], check=True)
     return python
 
 
@@ -85,6 +65,3 @@ def find_wheel(sha: str) -> str:
         sys.exit(f"no x86_64 wheel listed at {index}")
     return urllib.parse.urljoin(index, names[0])
 
-
-if __name__ == "__main__":
-    main()

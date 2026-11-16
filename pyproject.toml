@@ -1,18 +1,23 @@
 [project]
 name = "klgate"
-version = "0.0.1"
+version = "0.1.0"
 description = "Catch silent numeric changes between two vLLM builds"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
+    "aiohttp>=3.12",
     "numpy>=2",
-    "tokenizers>=0.23.3",
+    "requests>=2.32",
 ]
+
+[project.scripts]
+klgate = "klgate.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
     "pytest>=9.2.0",
 ]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]

@@ -1,0 +1,7 @@
+id = "null-42379-compiled"
+kind = "same"
+summary = "null-42379 in the default compiled mode, with CUDA graphs and autotuning"
+reference = "c0056b19bf4930ae7830e753b048b3daca0fbfee"
+candidate = "e9499996df8968f473db1f6bc7ec31207022aea0"
+model = "Qwen/Qwen3-0.6B"
+args = "--gpu-memory-utilization 0.55 --max-model-len 2048 --max-num-seqs 32"
