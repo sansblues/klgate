@@ -1,0 +1,8 @@
+id = "vllm-54048"
+kind = "unseen"
+summary = "Gemma 4 MoE router logits are rounded to bf16 before fp32"
+fix = "https://github.com/vllm-project/vllm/pull/54048"
+reference = "b5707bf994cb968adfc7a29fbb80b0582f53f38d"
+candidate = "680e2177e473ed8dfaa9773f7ead185b369cab46"
+model = "cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit"
+args = "--max-model-len 2048 --max-num-seqs 32 --dtype bfloat16 --limit-mm-per-prompt '{\"image\": 0, \"video\": 0}'"

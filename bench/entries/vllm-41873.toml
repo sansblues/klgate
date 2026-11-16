@@ -1,0 +1,8 @@
+id = "vllm-41873"
+kind = "unseen"
+summary = "Padded CUDA-graph rows keep stale is_prefilling values, so Mamba counts phantom prefills"
+fix = "https://github.com/vllm-project/vllm/pull/41873"
+reference = "39d5fa96a7c687f9ed7e14a5a52064965356cede"
+candidate = "565b745ec5d28dafd14585f1b695b159ba336a04"
+model = "ibm-granite/granite-4.0-h-1b-base"
+args = "--gpu-memory-utilization 0.55 --max-model-len 2048 --max-num-seqs 32"

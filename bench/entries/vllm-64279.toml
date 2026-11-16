@@ -1,0 +1,8 @@
+id = "vllm-64279"
+kind = "unseen"
+summary = "Whole-graph compile hands vLLM's ops non-eager strides, corrupting the KV cache"
+fix = "https://github.com/vllm-project/vllm/pull/64279"
+reference = "d1ad431de60f995585e75d66bb5bea55f313ca96"
+candidate = "510d15c49e9858814ca868c3dbf0344e3d3b42b5"
+model = "Qwen/Qwen3-0.6B"
+args = "--max-model-len 2048 --max-num-seqs 32 --model-impl transformers --compilation-config '{\"mode\": 2, \"backend\": \"inductor\"}'"

@@ -1,0 +1,11 @@
+id = "vllm-60047"
+kind = "unseen"
+summary = "The fp32 LM head reduces in another order under batch invariance (about 1e-6 relative)"
+fix = "https://github.com/vllm-project/vllm/pull/60047"
+reference = "829902026fa1a8835fdc3d54edb018ed450f20be"
+candidate = "bd24e246b054e526062f254f0a740330040a9053"
+model = "Qwen/Qwen3-0.6B"
+args = "--max-model-len 2048 --max-num-seqs 32 --hf-overrides '{\"head_dtype\": \"float32\"}'"
+
+[env]
+VLLM_BATCH_INVARIANT = "1"

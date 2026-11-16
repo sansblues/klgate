@@ -1,0 +1,8 @@
+id = "vllm-60156"
+kind = "unseen"
+summary = "Triton attention quantizes softmax weights to FP8 without rescaling, so small weights underflow to zero"
+fix = "https://github.com/vllm-project/vllm/pull/60156"
+reference = "ba77c4c13018aa19244545cdc7ae8e016d66955e"
+candidate = "e161a0798c2305252e2b9bae483c537e9d0fc027"
+model = "Qwen/Qwen3-0.6B"
+args = "--gpu-memory-utilization 0.55 --max-model-len 2048 --max-num-seqs 32 --kv-cache-dtype fp8 --attention-backend TRITON_ATTN"

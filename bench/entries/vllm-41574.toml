@@ -1,0 +1,9 @@
+id = "vllm-41574"
+kind = "unseen"
+summary = "Gemma 4 MoE experts use exact GELU instead of tanh GELU"
+fix = "https://github.com/vllm-project/vllm/pull/41574"
+reference = "6bb924bbf3a919dd6fe8a85033bd65f378b16421"
+candidate = "eaec7be4464c45edaf881ffe438d83e91ec1fff9"
+model = "google/gemma-4-26B-A4B-it"
+args = "--max-model-len 2048 --max-num-seqs 32 --quantization fp8 --limit-mm-per-prompt '{\"image\": 0, \"video\": 0}'"
+packages = ["transformers==5.7.0"]

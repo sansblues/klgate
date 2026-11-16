@@ -1,0 +1,8 @@
+id = "vllm-37810"
+kind = "unseen"
+summary = "Qwen3.5 gated DeltaNet holds A_log in bf16 instead of fp32 (inert here: the checkpoint's values are exact in bf16)"
+fix = "https://github.com/vllm-project/vllm/pull/37810"
+reference = "54ab804e87dd534c0a8cb8ad8eec7ad5d75775ae"
+candidate = "02e6efe56d545d50d342356630430b2ad9583ca9"
+model = "Qwen/Qwen3.5-0.8B"
+args = "--max-model-len 2048 --max-num-seqs 32 --limit-mm-per-prompt '{\"image\": 0, \"video\": 0}'"

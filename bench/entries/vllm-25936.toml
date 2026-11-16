@@ -1,0 +1,9 @@
+id = "vllm-25936"
+kind = "unseen"
+summary = "ERNIE-4.5 MoE router and its bias run in bf16 instead of fp32"
+fix = "https://github.com/vllm-project/vllm/pull/25936"
+reference = "ef6e0e7132ec7bd3dadd10df7486a8cd10cf9c0e"
+candidate = "1ad3aca6828ec3985a1de1dc3f206522fc27a518"
+model = "baidu/ERNIE-4.5-21B-A3B-PT"
+args = "--max-model-len 2048 --max-num-seqs 32 --quantization fp8"
+packages = ["transformers==4.57.6"]

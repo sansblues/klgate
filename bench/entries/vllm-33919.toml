@@ -1,0 +1,8 @@
+id = "vllm-33919"
+kind = "unseen"
+summary = "DeepSeek-V2 routing (one group, softmax) computed in bf16 instead of fp32"
+fix = "https://github.com/vllm-project/vllm/pull/33919"
+reference = "207c3a0c20c0fee6f375e37e067074b95053094f"
+candidate = "ae2e93f89b06529dba41b5c0adc1a6d27e921320"
+model = "deepseek-ai/DeepSeek-V2-Lite"
+args = "--max-model-len 2048 --max-num-seqs 32 --trust-remote-code"
