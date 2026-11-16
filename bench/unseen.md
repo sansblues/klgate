@@ -1,34 +1,71 @@
-# How the unseen bugs were picked
+# Bugs klgate never saw
 
-Two sets, each picked by a rule written before any of its bugs was replayed, with a
-prediction per bug.
+klgate was designed around 7 known bugs, so catching them proves little. To test it fairly,
+two more sets of bugs were picked by rules written before any of them was replayed, each
+with a prediction. This file keeps those rules, the predictions and every result, misses
+included.
+
+Of the 8 that could be scored, 6 were caught. #41873 was predicted not to trigger under
+klgate's workload, and #64279 struck only 3 of its 5 buggy runs.
 
 ## Set 1
 
-Every mined fix that is visible under greedy decoding, fits one GPU, has wheels for both
-commits and needs only server settings: 5 of 14 (the other 9 need LoRA, sleep mode,
-speculative decoding or special checkpoints). Two could be replayed: #60156 and #41873.
-#48010's buggy build crashes at startup with today's dependencies, #18957 predates the API
-fields the eval uses, and #47574 needs FP8 KV with FlashInfer on Blackwell. #41873 was
-predicted not to trigger under this workload.
+The rule: every mined fix that shows under greedy decoding, fits one GPU, has wheels for
+both commits and needs only server settings. That left 5 of 14; the other 9 need LoRA, sleep
+mode, speculative decoding or special checkpoints. Of the 5, #48010's buggy build crashes at
+startup with today's packages, #18957 predates the API the eval uses, and #47574 needs FP8 KV
+on Blackwell.
+
+| PR | What changes | Result | Score (needed) | p |
+|---|---|---|---|---|
+| #60156 | FP8 softmax weights underflow in Triton attention (L4) | CHANGED | probes 2.79× (1.33×) | 0.008 |
+| #41873 | Stale `is_prefilling` in padded Mamba CUDA-graph rows | same, as predicted: doesn't trigger here | 0.98× (1.29×) | 0.79 |
 
 ## Set 2
 
-Written 2026-11-15, before any of these bugs was replayed.
+### Results
 
-### Pool
+The rule and predictions below were written before any of these runs.
+
+| PR | Predicted | Result | Score (needed) | p |
+|---|---|---|---|---|
+| #33919 | caught, probes | CHANGED | probes 8.86×, decode ∞× (1.70×) | 0.008 |
+| #60047 | unsure | CHANGED | decode ∞× (8.15×) | 0.008 |
+| #54048 | caught, probes | CHANGED | decode 2.03× (1.27×) | 0.004 |
+| #25936 | caught, probes | CHANGED | traffic 47.8× (1.75×) | 0.004 |
+| #41574 | caught, probes | CHANGED | decode 1.37× (1.27×) | 0.008 |
+| #64279 | caught, gross | missed | traffic 1.17× (1.19×) | 0.079 |
+| #37810 | caught, decode | not a test: the bug is inert here | decode 1.33× (1.33×) | 0.44 |
+
+- #60047: batch invariance makes each build's reruns bit-identical, so a decode KL of ~1e-10
+  across builds reads as changed, though no output token changes.
+- #54048: this 4-bit community quant is noisy (probe KL between reruns of one build ~0.17,
+  outputs repetitive in both builds), yet the change still reads at 2× that noise in decode
+  (probes 1.40×, traffic 1.30×). Predicted probes; decode decided.
+- #41574: with `--quantization fp8` on an A40, reruns of one build differ by probe KL
+  ~0.22, yet the GELU change reads at 1.37× that noise in decode (1.27× needed).
+  Predicted probes (1.16×); decode decided.
+- #64279: probes and decode are bit-identical across builds; the bug shows only in batched
+  generation, and only in 3 of the 5 buggy launches (the other 2 read like the fixed build).
+  The prediction "gross" was wrong. Not rerun with more launches: that would tune on this set.
+- #37810: every `A_log` value in the Qwen3.5-0.8B checkpoint is exactly representable in bf16,
+  so holding it in bf16 changes nothing: 8 of the 10 runs decode bit-identically, and the
+  other two, both candidate runs, match each other. The triage that called it eligible was
+  wrong.
+
+Of the 7 that ran, #37810 was inert; 5 of the other 6 were caught.
+
+### The rule, written 2026-11-15 before any replay
 
 Every vLLM commit on `main` from 2025-08-15 to 2026-11-11 whose subject mentions a fix and
 a numeric word (accuracy, precision, incorrect, wrong, garbage, NaN, corrupt, numeric,
 rounding, overflow, underflow, mismatch, gibberish, correctness, bf16, fp32, fp16, dtype,
-stale, off-by-one), minus the 212 fixes in the first candidate list, minus subjects about
+stale, off-by-one), minus the 212 fixes screened earlier, minus subjects about
 hardware or features the eval can't run (ROCm, XPU, CPU, multi-GPU, LoRA, speculative
 decoding, Blackwell/Hopper-only kernels, multimodal, offloading, frontend/API). 134 commits,
-plus #37054 from the first list.
+plus #37054 from the earlier list.
 
-### Eligible
-
-All of:
+Eligible bugs meet all of:
 
 1. The fix changes what a model computes (not crash, validation, perf or logging only).
 2. A public model on one A40 (48 GB) or one L4 (24 GB) reaches the changed code.
@@ -41,8 +78,9 @@ result is reported, misses included.
 
 ### Candidates and predictions
 
-Triage read every diff: 10 of the 135 are eligible (#47309 met every rule but the 4th: no wheels;
-#37810 was confirmed eligible once the checkpoint's `A_log` proved to be stored in fp32).
+Triage read every diff: 10 of the 135 are eligible. #47309 met every rule but the 4th (no
+wheels). #37810 was confirmed eligible once the checkpoint's `A_log` proved to be stored in
+fp32.
 Predictions are mine, written 2026-11-15 before any replay.
 
 | PR | What changes | Model, GPU, settings | Predicted part | Caught? |
@@ -81,33 +119,3 @@ them. The informative ones are the other six.
   and #54048 and #41574 also get `--limit-mm-per-prompt '{"image": 0, "video": 0}'`. None of
   this changes the text model's numerics, and both builds of a pair stay identical outside
   the commit.
-
-### Results
-
-| PR | Predicted | Result | Score (needed) | p |
-|---|---|---|---|---|
-| #33919 | caught, probes | CHANGED | probes 8.86×, decode ∞× (1.70×) | 0.008 |
-| #60047 | unsure | CHANGED | decode ∞× (8.15×) | 0.008 |
-| #54048 | caught, probes | CHANGED | decode 2.03× (1.27×) | 0.004 |
-| #25936 | caught, probes | CHANGED | traffic 47.8× (1.75×) | 0.004 |
-| #41574 | caught, probes | CHANGED | decode 1.37× (1.27×) | 0.008 |
-| #64279 | caught, gross | missed | traffic 1.17× (1.19×) | 0.079 |
-| #37810 | caught, decode | not a test: the bug is inert here | decode 1.33× (1.33×) | 0.44 |
-
-- #60047: batch invariance makes each build's reruns bit-identical, so a decode KL of ~1e-10
-  across builds reads as changed, though no output token changes.
-- #54048: this 4-bit community quant is noisy (probe KL between reruns of one build ~0.17,
-  outputs repetitive in both builds), yet the change still reads at 2× that noise in decode
-  (probes 1.40×, traffic 1.30×). Predicted probes; decode decided.
-- #41574: with `--quantization fp8` on an A40, reruns of one build differ by probe KL
-  ~0.22, yet the GELU change reads at 1.37× that noise in decode (1.27× needed). Predicted probes
-  (1.16×); decode decided.
-- #64279: probes and decode are bit-identical across builds; the bug shows only in batched
-  generation, and only in 3 of the 5 buggy launches (the other 2 read like the fixed build).
-  The prediction "gross" was wrong. Not rerun with more launches: that would tune on this set.
-- #37810: every `A_log` value in the Qwen3.5-0.8B checkpoint is exactly representable in bf16,
-  so holding it in bf16 changes nothing: 8 of the 10 runs decode bit-identically, and the
-  other two, both candidate runs, match each other. The triage that called it eligible was wrong.
-
-Of the 7 that ran, #37810 was inert; 5 of the other 6 were caught. The miss, #64279, strikes
-only some launches.
