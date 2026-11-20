@@ -61,7 +61,7 @@ def world(rng) -> tuple[np.ndarray, np.ndarray]:
     return rng.normal(size=(8, 16, 32)), rng.normal(size=(8, 6, 32))
 
 
-REF, CAND = range(0, 5), range(5, 10)
+REF, CAND = range(0, 7), range(7, 14)
 
 
 def test_a_consistent_shift_is_flagged_by_the_probes():
@@ -70,15 +70,17 @@ def test_a_consistent_shift_is_flagged_by_the_probes():
     shifted = probes + 0.1 * rng.normal(size=probes.shape)
     refs, cands = reruns(rng, probes, traffic, REF), reruns(rng, shifted, traffic, CAND)
     result = drift.compare(refs, cands)
-    assert result["changed"]
-    assert result["p"] <= 2 / math.comb(10, 5)
+    assert result["verdict"] == "changed"
+    assert result["p"] <= 2 / math.comb(14, 7)
     assert result["ratios"]["probes"] > 10
     assert result["score"] == result["ratios"]["probes"] > result["needed"]
     assert result["stats"]["same_top"] < 1
     matrices = {part: np.array(m) for part, m in result["matrices"].items()}
-    assert drift.decide(matrices, 5)["p"] == result["p"]
-    # Four runs of each build are enough for a clear change.
-    assert drift.compare(refs[:4], cands[:4])["p"] <= 2 / math.comb(8, 4)
+    assert drift.decide(matrices, 7)["p"] == result["p"]
+    assert drift.staged(matrices)["verdict"] == "changed"
+    # Fewer runs see a clear change too, but can't rule out chance.
+    for n in (2, 5):
+        assert drift.compare(refs[:n], cands[:n])["verdict"] == "more"
 
 
 def test_reruns_that_disagree_are_flagged_by_the_traffic():
@@ -89,7 +91,7 @@ def test_reruns_that_disagree_are_flagged_by_the_traffic():
         reruns(rng, probes, traffic, REF),
         reruns(rng, probes, traffic, CAND, traffic_noise=0.3),
     )
-    assert result["changed"]
+    assert result["verdict"] == "changed"
     assert result["ratios"]["traffic"] > 3
     assert result["ratios"]["probes"] < 2
 
@@ -101,7 +103,7 @@ def test_identical_runs_score_zero():
         [fake_run(probes, traffic, s) for s in CAND],
     )
     assert result["ratios"] == {"probes": 0.0, "decode": 0.0, "traffic": 0.0}
-    assert not result["changed"]
+    assert result["verdict"] == "same"
     assert result["stats"]["kl"] == 0
 
 
@@ -114,7 +116,7 @@ def test_any_difference_from_bit_identical_reruns_reads_changed():
         [fake_run(shifted, traffic, s) for s in CAND],
     )
     assert result["ratios"]["probes"] == math.inf
-    assert result["changed"]
+    assert result["verdict"] == "changed"
     assert json.loads(json.dumps(drift.jsonable(result)))["score"] == "inf"
 
 
@@ -131,13 +133,13 @@ def test_a_quiet_candidate_with_different_traffic_is_flagged():
         ],
         [fake_run(probes, other, s) for s in CAND],
     )
-    assert result["changed"]
-    assert result["p"] <= 2 / math.comb(10, 5)
+    assert result["verdict"] == "changed"
+    assert result["p"] <= 2 / math.comb(14, 7)
 
 
-def test_at_most_alpha_of_the_splits_of_any_runs_read_changed():
+def test_at_most_two_of_the_splits_of_any_runs_separate():
     # The test's guarantee, checked exactly: taking each of the 70 splits of the
-    # same 4 + 4 runs in turn as the real one, at most alpha of them read changed.
+    # same 4 + 4 runs in turn as the real one, at most 2 of them don't read same.
     # Probe reruns land in one of a few bit-identical states, as real ones do.
     rng = np.random.default_rng(11)
     probes, traffic = world(rng)
@@ -164,9 +166,9 @@ def test_at_most_alpha_of_the_splits_of_any_runs_read_changed():
         order = [*ref, *(i for i in range(8) if i not in ref)]
         relabeled = {k: m[np.ix_(order, order)] for k, m in matrices.items()}
         result = drift.decide(relabeled, 4)
-        assert result["changed"] == (result["score"] > result["needed"])
-        changed += result["changed"]
-    assert changed <= 0.05 * math.comb(8, 4)
+        assert (result["verdict"] != "same") == (result["score"] > result["needed"])
+        changed += result["verdict"] != "same"
+    assert changed <= 2 == result["chance"] * math.comb(8, 4)
 
 
 def test_p_does_not_depend_on_the_order_of_runs_within_a_build():
@@ -193,9 +195,9 @@ def test_the_score_needed_is_the_verdict():
             m = rng.random((10, 10))
             m[np.ix_(range(5), range(5, 10))] += shift * rng.random()
             matrices[part] = m
-        for alpha in (0.01, 0.05, 0.1):
-            r = drift.decide(matrices, 5, alpha)
-            assert r["changed"] == (r["score"] > r["needed"]) == (r["p"] <= alpha)
+        r = drift.decide(matrices, 5)
+        differs = r["verdict"] != "same"
+        assert differs == (r["score"] > r["needed"]) == (r["p"] <= r["chance"])
 
 
 def test_compare_rejects_runs_it_cannot_compare():
@@ -206,19 +208,15 @@ def test_compare_rejects_runs_it_cannot_compare():
     def with_meta(run: dict, **changes) -> dict:
         return run | {"meta": run["meta"] | changes}
 
-    with pytest.raises(
-        ValueError, match="too few for p to reach 0.05 reliably: record at least 4"
-    ):
-        drift.compare(refs[:3], cands[:3])
-    with pytest.raises(ValueError, match="at least 6"):
-        drift.compare(refs, cands, alpha=0.005)
+    with pytest.raises(ValueError, match="1 runs of each build: record 2 to 8"):
+        drift.compare(refs[:1], cands[:1])
     nine = reruns(rng, probes, traffic, range(20, 29))
-    with pytest.raises(ValueError, match="record at most 8"):
+    with pytest.raises(ValueError, match="9 runs of each build: record 2 to 8"):
         drift.compare(nine, reruns(rng, probes, traffic, range(30, 39)))
     with pytest.raises(ValueError, match="record as many runs of each build"):
         drift.compare(refs[:4], cands)
     with pytest.raises(ValueError, match="differ in gpu"):
-        drift.compare(refs, [*cands[:4], with_meta(cands[4], gpu="other")])
+        drift.compare(refs, [*cands[:6], with_meta(cands[6], gpu="other")])
 
 
 def test_bucketed_kl_is_exact_when_k_covers_the_vocab_and_a_lower_bound_when_not():
@@ -378,3 +376,37 @@ def test_server_responses_become_arrays():
             "traffic",
             drift.TRAFFIC_TOKENS,
         )
+
+
+def test_the_verdict_takes_enough_runs_to_rule_out_chance():
+    # A split that always scores highest: same never, changed only once the
+    # chance of identical builds separating is at most 1 in 1,000.
+    for n, verdict in ((2, "more"), (5, "more"), (6, "more"), (7, "changed")):
+        m = np.ones((2 * n, 2 * n))
+        m[np.ix_(range(n), range(n, 2 * n))] = 9
+        r = drift.decide({"probes": m}, n)
+        assert (r["verdict"], r["chance"]) == (verdict, 2 / math.comb(2 * n, n))
+    assert drift.decide({"probes": np.ones((14, 14))}, 7)["verdict"] == "same"
+    assert 2 / math.comb(14, 7) <= drift.CHANCE < 2 / math.comb(12, 6)
+
+
+def test_a_staged_check_stops_at_the_first_stage_that_reads_same():
+    rng = np.random.default_rng(15)
+    noise = {"probes": 1 + rng.random((14, 14))}
+    assert drift.staged(noise)["runs"] in drift.STAGES
+    # The builds differ in their first two runs only: the second stage ends it.
+    m = np.ones((14, 14))
+    m[np.ix_(range(2), range(7, 9))] = 9
+    r = drift.staged({"probes": m})
+    assert (r["runs"], r["verdict"]) == (5, "same")
+
+
+def test_render_says_what_to_do_next():
+    rng = np.random.default_rng(16)
+    probes, traffic = world(rng)
+    shifted = probes + 0.1 * rng.normal(size=probes.shape)
+    refs, cands = reruns(rng, probes, traffic, REF), reruns(rng, shifted, traffic, CAND)
+    assert "Verdict: CHANGED" in drift.render(drift.compare(refs, cands))
+    assert "1 in 1,716" in drift.render(drift.compare(refs, cands))
+    assert "record 5 runs of each to settle it" in drift.render(drift.compare(refs[:2], cands[:2]))
+    assert "Verdict: same within noise" in drift.render(drift.compare(refs, refs[::-1][:0] + reruns(rng, probes, traffic, range(20, 27))))

@@ -19,7 +19,12 @@ reruns of the reference build differ from each other?
 `compare` scores each part as the mean KL across builds over the mean KL between
 reruns, takes the largest, and tests it with an exact permutation test over the
 runs: if the builds are the same, any split of the runs into two groups is as
-likely as the real one.
+likely as the real one, so the real one rarely scores highest.
+
+Runs come in stages of 2, 5 and 7 of each build. After each stage the builds
+either look the same, which ends the check, or separate, which calls for the
+next stage. Separating at 7 runs reads as changed: identical builds do that
+less than once in a thousand checks.
 
 The same code as vLLM's tests/evals/logprob_drift, apart from where the GSM8K
 prompts and the GPU name come from. Usage, against a new server with empty caches
@@ -59,7 +64,8 @@ WIKI_URL = (
 )
 WIKI_MEMBER = "wikitext-2-raw/wiki.test.raw"
 WIKI_SHA = "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08"
-ALPHA = 0.05
+STAGES = (2, 5, 7)  # runs of each build after which the builds are compared
+CHANCE = 1e-3  # how often identical builds may read as changed
 MAX_RUNS = 8  # runs of each build; 8 + 8 split 12,870 ways, all enumerated
 TAIL_FLOOR = 1e-9
 FORMAT = 2
@@ -282,9 +288,9 @@ def load(path: Path) -> dict:
 # Comparing
 
 
-def compare(refs: list[dict], cands: list[dict], alpha: float = ALPHA) -> dict:
+def compare(refs: list[dict], cands: list[dict]) -> dict:
     """Whether the candidate runs differ from the reference runs beyond noise."""
-    check(refs, cands, alpha)
+    check(refs, cands)
     runs = refs + cands
     matrices = {
         "probes": kl_matrix(probe_kl, runs),
@@ -293,20 +299,23 @@ def compare(refs: list[dict], cands: list[dict], alpha: float = ALPHA) -> dict:
     }
     return (
         {"stats": stats(refs[0], cands[0])}
-        | decide(matrices, len(refs), alpha)
+        | decide(matrices, len(refs))
         # Enough to redo the verdict without the runs.
         | {"matrices": {part: m.tolist() for part, m in matrices.items()}}
     )
 
 
-def decide(matrices: dict[str, np.ndarray], n: int, alpha: float = ALPHA) -> dict:
+def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
     """The verdict from each part's KL matrix between runs, the reference's n
     runs first: [i][j] is KL(run i || run j).
 
     A split's score is the largest of its ratios, each about 1 when nothing
-    changed. p is the share of splits scoring at least as high as the real one,
-    and the real split reads changed when its score is above the one needed:
-    the highest that more than alpha of the splits reach.
+    changed. p is the share of splits scoring at least as high as the real one.
+    The builds separate when only one other split does, since the reversed
+    split can tie the real one however large the change. Identical builds
+    separate with probability `chance`, so the verdict is "same" when they
+    don't, "changed" when they do with enough runs for `chance` to be at most
+    CHANCE, and "more" when they do with fewer.
     """
     ratios = np.array(
         [
@@ -316,20 +325,39 @@ def decide(matrices: dict[str, np.ndarray], n: int, alpha: float = ALPHA) -> dic
     )
     scores = ratios.max(axis=1)
     total = len(scores)
-    allowed = max(c for c in range(total) if c / total <= alpha)
     p = int((scores >= scores[0]).sum()) / total
+    chance = 2 / total
+    separated = p <= chance
     return {
         "ratios": dict(zip(matrices, ratios[0].tolist())),
         "score": float(scores[0]),
-        "needed": float(np.sort(scores)[::-1][allowed]),
+        # The third highest score: the real split must beat it.
+        "needed": float(np.sort(scores)[::-1][2]),
         "p": p,
         "splits": total,
-        "alpha": alpha,
-        "changed": p <= alpha,
+        "runs": n,
+        "chance": chance,
+        "verdict": "same"
+        if not separated
+        else "changed"
+        if chance <= CHANCE
+        else "more",
     }
 
 
-def check(refs: list[dict], cands: list[dict], alpha: float = ALPHA) -> None:
+def staged(matrices: dict[str, np.ndarray]) -> dict:
+    """The verdict a staged check reaches on these runs: decide on the first 2
+    runs of each build, then 5, then 7, stopping once they read the same."""
+    n = len(next(iter(matrices.values()))) // 2
+    for stage in [s for s in STAGES if s < n] + [n]:
+        keep = [*range(stage), *range(n, n + stage)]
+        result = decide({p: m[np.ix_(keep, keep)] for p, m in matrices.items()}, stage)
+        if result["verdict"] == "same":
+            break
+    return result
+
+
+def check(refs: list[dict], cands: list[dict]) -> None:
     """Exit unless the runs can be compared."""
     # Traffic noise comes from the reference side alone, so with more candidate
     # runs than reference runs, every split that takes its reference side from
@@ -339,17 +367,9 @@ def check(refs: list[dict], cands: list[dict], alpha: float = ALPHA) -> None:
             f"{len(refs)} reference and {len(cands)} candidate runs: record as "
             "many runs of each build"
         )
-    if len(refs) > MAX_RUNS:
-        raise ValueError(f"{len(refs)} runs of each build: record at most {MAX_RUNS}")
-    if not 0 < alpha < 1:
-        raise ValueError(f"alpha is {alpha}: pick one between 0 and 1")
-    # The reversed split can score as high as the real one, so p can be 2 over
-    # the number of splits however large the change.
-    if math.comb(2 * len(refs), len(refs)) < 2 / alpha:
-        needed = next(n for n in itertools.count(1) if math.comb(2 * n, n) >= 2 / alpha)
+    if not STAGES[0] <= len(refs) <= MAX_RUNS:
         raise ValueError(
-            f"{len(refs)} runs of each build are too few for p to reach {alpha} "
-            f"reliably: record at least {needed}"
+            f"{len(refs)} runs of each build: record {STAGES[0]} to {MAX_RUNS}"
         )
     for side, runs in (("reference", refs), ("candidate", cands)):
         if len(versions := {run["meta"]["vllm"] for run in runs}) > 1:
@@ -505,21 +525,37 @@ def render(r: dict) -> str:
     def times(x: float) -> str:
         return f"{x:,.2f}×" if math.isfinite(x) else "∞×"
 
-    s, ratios = r["stats"], r["ratios"]
+    s, ratios, n = r["stats"], r["ratios"], r["runs"]
     first = (
         f"First runs: probe KL {s['kl']:.6f}, same top token "
         f"{100 * s['same_top']:.2f} %, "
         f"{100 * s['outputs_differ']:.1f} % of outputs differ"
     )
     parts = ", ".join(f"{part} {times(x)}" for part, x in ratios.items())
-    noise = f"Across builds over rerun noise: {parts}"
-    verdict = (
-        f"Verdict: {'CHANGED' if r['changed'] else 'same within noise'}, "
-        f"{times(r['score'])} is {'above' if r['changed'] else 'not above'} the "
-        f"{times(r['needed'])} needed (p = {r['p']:.4f} over {r['splits']} splits, "
-        f"alpha {r['alpha']})"
-    )
+    noise = f"Across builds over rerun noise, {n} runs of each: {parts}"
+    odds = f"1 in {round(1 / r['chance']):,}"
+    if r["verdict"] == "same":
+        verdict = (
+            f"Verdict: same within noise, {times(r['score'])} is not above the "
+            f"{times(r['needed'])} needed (p = {r['p']:.4f} over {r['splits']:,} splits)"
+        )
+    elif r["verdict"] == "changed":
+        verdict = (
+            f"Verdict: CHANGED, {times(r['score'])} is above the "
+            f"{times(r['needed'])} needed; identical builds read this way {odds} times"
+        )
+    else:
+        verdict = (
+            f"Undecided: the builds differ, {times(r['score'])} against the "
+            f"{times(r['needed'])} needed, but identical builds read this way "
+            f"{odds} times; record {next_stage(n)} runs of each to settle it"
+        )
     return "\n".join([first, noise, verdict])
+
+
+def next_stage(n: int) -> int:
+    """The number of runs of each build to have next."""
+    return next((s for s in STAGES if s > n), MAX_RUNS)
 
 
 def jsonable(x):
@@ -549,7 +585,6 @@ def main() -> None:
     cmp = sub.add_parser("compare", help="compare recorded runs")
     cmp.add_argument("--reference", type=Path, nargs="+", required=True)
     cmp.add_argument("--candidate", type=Path, nargs="+", required=True)
-    cmp.add_argument("--alpha", type=float, default=ALPHA)
     cmp.add_argument("--json", type=Path, help="also write the result here")
     args = ap.parse_args()
     try:
@@ -567,12 +602,14 @@ def command(args: argparse.Namespace) -> None:
         save(run, args.out)
         print(json.dumps(run["meta"]))
         return
-    result = compare(
-        [load(p) for p in args.reference], [load(p) for p in args.candidate], args.alpha
-    )
+    refs = [load(p) for p in args.reference]
+    cands = [load(p) for p in args.candidate]
+    # With fewer candidate runs than reference runs, compare as many of each.
+    result = compare(refs[: len(cands)], cands)
     print(render(result))
     if args.json:
         args.json.write_text(json.dumps(jsonable(result), indent=2) + "\n")
+    raise SystemExit({"same": 0, "changed": 1, "more": 3}[result["verdict"]])
 
 
 if __name__ == "__main__":
