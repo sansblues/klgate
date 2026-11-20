@@ -119,3 +119,42 @@ them. The informative ones are the other six.
   and #54048 and #41574 also get `--limit-mm-per-prompt '{"image": 0, "video": 0}'`. None of
   this changes the text model's numerics, and both builds of a pair stay identical outside
   the commit.
+
+## Set 3
+
+Written 2026-11-20, before any of these replays.
+
+### The rest of Set 2
+
+Set 2 left three eligible bugs unrun, all predicted gross: #42782, whose replay harness
+crashed, and #37054 and #29867, for budget. They run now, with Set 2's settings and
+predictions. Their rows named an L4; #42782 runs on an RTX 4070 Ti, also Ada, and the two
+DeepSeek-Coder rows on an A40, which is Ampere, so a miss there may be the GPU's.
+
+### The rule, applied to the commits since
+
+Set 2's rule over `main` from 2026-11-11 to 2026-11-20 gives 11 commits. None is eligible:
+
+| PR | Why not |
+|---|---|
+| #68737 | Multimodal |
+| #68386 | Reaches the changed kernel only on Hopper; no A40 or L4 path |
+| #66133, #67966, #67606 | ROCm |
+| #63113, #63749 | Frontend |
+| #66839 | Needs NaN scores, which requests can't make |
+| #67215 | A crash, not a change in what a model computes |
+| #55229, #65755 | Multi-GPU |
+
+### A bug raised in the RFC
+
+In [RFC #61698](https://github.com/vllm-project/vllm/issues/61698), #67789 was named as a
+bug a logprob check can't see: TurboQuant's prefill fast path drops the KV a request cached
+in an earlier chunk when its last chunk shares a step with a fresh prompt at least as long.
+It was picked by that discussion, not by the rule, so it is counted apart.
+
+Predicted, before its replay: caught, medium. Decode can't see it, since it sends one
+request at a time. Probes may: 32 prompts of equal length arrive at once, so a prompt's
+last chunk can share a step with a fresh prompt. Traffic may too, in its first steps,
+before the shared prefix is cached. Qwen/Qwen3-0.6B, A40, `--kv-cache-dtype turboquant_k8v4`.
+The fix is unmerged, so its build is the merge base's wheel with the PR's two Python files
+laid over it.
