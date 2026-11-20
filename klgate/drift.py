@@ -93,7 +93,9 @@ async def record(base_url: str, seed: int, setup: dict | None = None) -> dict:
     chunks = np.array(ids[: CHUNKS * CONTEXT], np.int32).reshape(CHUNKS, CONTEXT)
 
     timeout = aiohttp.ClientTimeout(total=3600)
-    connector = aiohttp.TCPConnector(limit=0)  # send everything at once
+    # Send everything at once, each request on its own connection: the server
+    # closes idle ones, and a request sent on one as it closes is lost.
+    connector = aiohttp.TCPConnector(limit=0, force_close=True)
     generate = {
         "logprobs": TOP_K,
         "return_tokens_as_token_ids": True,
