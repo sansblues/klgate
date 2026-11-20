@@ -26,6 +26,7 @@ def generated(logits: np.ndarray, part: str) -> dict:
         f"{part}_ids": ids,
         f"{part}_lp": lp,
         f"{part}_lengths": np.full(len(logits), logits.shape[1], np.int32),
+        f"{part}_text": np.array([" ".join(map(str, row)) for row in ids[..., 0]]),
     }
 
 
@@ -330,6 +331,7 @@ def test_server_responses_become_arrays():
     traffic = [
         {
             "token_ids": [7, 3],
+            "text": " seven three",
             "logprobs": {
                 "top_logprobs": [
                     {"token_id:7": -0.1, "token_id:9": -2.5},
@@ -337,10 +339,11 @@ def test_server_responses_become_arrays():
                 ]
             },
         },
-        {"token_ids": [], "logprobs": {"top_logprobs": []}},
+        {"token_ids": [], "text": "", "logprobs": {"top_logprobs": []}},
     ]
     run = drift.generated_arrays(traffic, "traffic", drift.TRAFFIC_TOKENS)
     assert run["traffic_lengths"].tolist() == [2, 0]
+    assert run["traffic_text"].tolist() == [" seven three", ""]
     assert run["traffic_tokens"][0, :3].tolist() == [7, 3, -1]
     assert run["traffic_ids"][0, 1, :4].tolist() == [3, 7, 5, -1]
     assert run["traffic_lp"][0, 1, :3].tolist() == pytest.approx([-0.3, -1.0, -4.0])
@@ -410,3 +413,24 @@ def test_render_says_what_to_do_next():
     assert "1 in 1,716" in drift.render(drift.compare(refs, cands))
     assert "record 5 runs of each to settle it" in drift.render(drift.compare(refs[:2], cands[:2]))
     assert "Verdict: same within noise" in drift.render(drift.compare(refs, refs[::-1][:0] + reruns(rng, probes, traffic, range(20, 27))))
+
+
+def test_a_change_is_located():
+    rng = np.random.default_rng(17)
+    probes, traffic = world(rng)
+    refs = reruns(rng, probes, traffic, REF)
+    # One prompt's traffic goes wrong in the candidate.
+    wrong = traffic.copy()
+    wrong[3] = rng.normal(size=traffic[3].shape)
+    result = drift.compare(refs, reruns(rng, probes, wrong, CAND))
+    w = result["where"]
+    assert (result["verdict"], w["part"], w["item"], w["position"]) == ("changed", "traffic", 3, 0)
+    assert w["beyond"] <= 3 and w["reference"] != w["candidate"]
+    text = drift.render(result)
+    assert "Where: traffic" in text and "most, prompt 3, whose outputs first differ at token 0" in text
+    # A shift in the probes is located by chunk and position.
+    shifted = probes.copy()
+    shifted[2, 5] += 3 * rng.normal(size=probes.shape[-1])
+    cands = reruns(rng, shifted, traffic, CAND)
+    w = drift.where(drift.item_kls(drift.probe_kls, refs + cands), "probes", refs[0], cands[0])
+    assert (w["item"], w["position"], w["beyond"]) == (2, 5, 1)

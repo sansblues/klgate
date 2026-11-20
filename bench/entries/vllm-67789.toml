@@ -1,0 +1,8 @@
+id = "vllm-67789"
+kind = "raised"
+summary = "TurboQuant's prefill fast path drops the KV a request cached in an earlier chunk when its last chunk shares a step with a fresh prompt at least as long"
+fix = "https://github.com/vllm-project/vllm/pull/67789"
+reference = "4c57b92442a1e6410377b893ea2a4c1a20b28d02"
+candidate = "d2da27eb2defb88377636fba83d9a41ad35bf44d"
+model = "Qwen/Qwen3-0.6B"
+args = "--gpu-memory-utilization 0.55 --max-model-len 2048 --max-num-seqs 32 --kv-cache-dtype turboquant_k8v4"

@@ -31,6 +31,7 @@ ENTRIES, DATA = ROOT / "bench" / "entries", ROOT / "data"
 KINDS = {
     "known": "Bugs klgate was built on",
     "unseen": "Bugs it never saw, picked by a rule fixed before running",
+    "raised": "Bugs raised in vLLM's RFC #61698 as out of reach of a check like this",
     "same": "Identical engine code: any CHANGED is a false alarm",
 }
 WORDS = {"same": "same", "changed": "CHANGED", "more": "differs"}
@@ -66,8 +67,9 @@ def table() -> str:
     entries = [tomllib.loads(p.read_text()) for p in sorted(ENTRIES.glob("*.toml"))]
     lines = []
     for kind, title in KINDS.items():
-        lines += ["", title]
-        for e in (e for e in entries if e["kind"] == kind):
+        replayed = [e for e in entries if e["kind"] == kind and (DATA / f"{e['id']}.json").exists()]
+        lines += ["", title] * bool(replayed)
+        for e in replayed:
             for r in json.loads((DATA / f"{e['id']}.json").read_text()):
                 matrices = {part: np.array(m) for part, m in r["matrices"].items()}
                 n = len(matrices["probes"]) // 2

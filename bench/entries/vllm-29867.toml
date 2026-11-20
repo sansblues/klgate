@@ -1,0 +1,8 @@
+id = "vllm-29867"
+kind = "unseen"
+summary = "Static per-tensor FP8 scaling overflows when building MLA decode weights (up to about 6 %)"
+fix = "https://github.com/vllm-project/vllm/pull/29867"
+reference = "a5bbbd2f24983f309f915a1de911b9301e1699e2"
+candidate = "8c8653b67217ad41f89c10bc7fc097d0881bb63d"
+model = "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8"
+args = "--max-model-len 2048 --max-num-seqs 32 --trust-remote-code"

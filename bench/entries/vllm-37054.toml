@@ -1,0 +1,8 @@
+id = "vllm-37054"
+kind = "unseen"
+summary = "FP8 MLA reads V from the KV cache with the wrong scale (2× with computed scales)"
+fix = "https://github.com/vllm-project/vllm/pull/37054"
+reference = "577df69b26491aaa8f3fef2ea44d6ac256172032"
+candidate = "04244fd0e1d082134d22ae1021a9bad993db4f59"
+model = "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8"
+args = "--max-model-len 2048 --max-num-seqs 32 --kv-cache-dtype fp8 --calculate-kv-scales --trust-remote-code"

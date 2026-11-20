@@ -1,0 +1,8 @@
+id = "vllm-42782"
+kind = "unseen"
+summary = "An explicit --kv-cache-dtype bfloat16 is ignored for a checkpoint with a KV cache scheme: the KV is stored in fp8, by another backend"
+fix = "https://github.com/vllm-project/vllm/pull/42782"
+reference = "852f567444cf8c206219edb7b2c42aec55fc41cf"
+candidate = "b2a27b82d970efa0203c06be6dc0d94526edaab0"
+model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
+args = "--max-model-len 2048 --max-num-seqs 32 --kv-cache-dtype bfloat16"

@@ -68,7 +68,7 @@ STAGES = (2, 5, 7)  # runs of each build after which the builds are compared
 CHANCE = 1e-3  # how often identical builds may read as changed
 MAX_RUNS = 8  # runs of each build; 8 + 8 split 12,870 ways, all enumerated
 TAIL_FLOOR = 1e-9
-FORMAT = 2
+FORMAT = 3
 
 
 # Recording
@@ -187,6 +187,7 @@ def generated_arrays(choices: list[dict], part: str, length: int) -> dict:
         for t, top in enumerate(tops):
             ranked = {int(k.removeprefix("token_id:")): v for k, v in top.items()}
             put(run["ids"][i, t], run["lp"][i, t], ranked)
+    run["text"] = np.array([choice["text"] for choice in choices])
     return {f"{part}_{k}": v for k, v in run.items()}
 
 
@@ -292,17 +293,64 @@ def compare(refs: list[dict], cands: list[dict]) -> dict:
     """Whether the candidate runs differ from the reference runs beyond noise."""
     check(refs, cands)
     runs = refs + cands
-    matrices = {
-        "probes": kl_matrix(probe_kl, runs),
-        "decode": kl_matrix(functools.partial(generated_kl, part="decode"), runs),
-        "traffic": kl_matrix(functools.partial(generated_kl, part="traffic"), runs),
+    # Each part's KL between every two runs, by item: chunk or prompt.
+    items = {
+        "probes": item_kls(probe_kls, runs),
+        "decode": item_kls(functools.partial(generated_kls, part="decode"), runs),
+        "traffic": item_kls(functools.partial(generated_kls, part="traffic"), runs),
     }
+    matrices = {part: kls.mean(axis=-1) for part, kls in items.items()}
+    result = decide(matrices, len(refs))
+    part = max(result["ratios"], key=result["ratios"].get)
     return (
         {"stats": stats(refs[0], cands[0])}
-        | decide(matrices, len(refs))
+        | result
+        | {"where": where(items[part], part, refs[0], cands[0])}
         # Enough to redo the verdict without the runs.
         | {"matrices": {part: m.tolist() for part, m in matrices.items()}}
     )
+
+
+def where(kls: np.ndarray, part: str, ref: dict, cand: dict) -> dict:
+    """Where the builds differ most in a part: how many of its items differ more
+    across builds than between any two reference reruns, the one that does so
+    most, and how the first runs of each build read it."""
+    n = len(kls) // 2
+    across = kls[:n, n:].mean(axis=(0, 1))
+    pairs = ~np.eye(n, dtype=bool)
+    within = kls[:n, :n][pairs].max(axis=0)
+    item = int(np.argmax(across - within))
+    found = {
+        "part": part,
+        "items": len(across),
+        "beyond": int((across > within).sum()),
+        "item": item,
+    }
+    if part == "probes":
+        kl = bucketed_kl(
+            ref["probe_ids"][item],
+            ref["probe_lp"][item],
+            cand["probe_ids"][item],
+            cand["probe_lp"][item],
+        )
+        position = int(np.argmax(kl))
+        return found | {
+            "position": position,
+            "reference": top(ref["probe_ids"][item, position], ref["probe_lp"][item, position]),
+            "candidate": top(cand["probe_ids"][item, position], cand["probe_lp"][item, position]),
+        }
+    a, b = ref[f"{part}_tokens"][item], cand[f"{part}_tokens"][item]
+    differ = np.flatnonzero(a != b)
+    texts = [str(run[f"{part}_text"][item]) for run in (ref, cand) if f"{part}_text" in run]
+    return found | {
+        "position": int(differ[0]) if len(differ) else None,
+        **dict(zip(("reference", "candidate"), texts)),
+    }
+
+
+def top(ids: np.ndarray, lp: np.ndarray) -> str:
+    """A position's three likeliest tokens with their probabilities."""
+    return ", ".join(f"{int(i)} ({math.exp(float(x)):.3f})" for i, x in zip(ids[:3], lp[:3]))
 
 
 def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
@@ -436,6 +484,16 @@ def mean(values: np.ndarray) -> float:
     return math.fsum(values.ravel().tolist()) / values.size
 
 
+def item_kls(divergence, runs: list[dict]) -> np.ndarray:
+    """[i][j] is KL(run i || run j) by item."""
+    return np.array(
+        [
+            [divergence(a, b) if i != j else 0 * divergence(a, b) for j, b in enumerate(runs)]
+            for i, a in enumerate(runs)
+        ]
+    )
+
+
 def kl_matrix(divergence, runs: list[dict]) -> np.ndarray:
     return np.array(
         [
@@ -446,15 +504,22 @@ def kl_matrix(divergence, runs: list[dict]) -> np.ndarray:
 
 
 def probe_kl(a: dict, b: dict) -> float:
-    return float(
-        bucketed_kl(a["probe_ids"], a["probe_lp"], b["probe_ids"], b["probe_lp"]).mean()
-    )
+    return float(probe_kls(a, b).mean())
+
+
+def probe_kls(a: dict, b: dict) -> np.ndarray:
+    """Each chunk's mean KL over its positions."""
+    return bucketed_kl(a["probe_ids"], a["probe_lp"], b["probe_ids"], b["probe_lp"]).mean(axis=-1)
 
 
 def generated_kl(a: dict, b: dict, part: str) -> float:
-    """Mean over prompts of the mean KL over the positions both runs condition
-    alike: up to and including the first differing token, or the shorter
-    output's end. A prompt with no such position counts as 0."""
+    return float(generated_kls(a, b, part).mean())
+
+
+def generated_kls(a: dict, b: dict, part: str) -> np.ndarray:
+    """Each prompt's mean KL over the positions both runs condition alike: up to
+    and including the first differing token, or the shorter output's end. A
+    prompt with no such position counts as 0."""
     n = np.minimum(a[f"{part}_lengths"], b[f"{part}_lengths"])
     differ = a[f"{part}_tokens"] != b[f"{part}_tokens"]
     before = np.cumsum(differ, axis=1) - differ
@@ -466,7 +531,7 @@ def generated_kl(a: dict, b: dict, part: str) -> float:
         b[f"{part}_ids"][compared],
         b[f"{part}_lp"][compared],
     )
-    return float(np.mean(kl.sum(axis=1) / np.maximum(compared.sum(axis=1), 1)))
+    return kl.sum(axis=1) / np.maximum(compared.sum(axis=1), 1)
 
 
 def bucketed_kl(
@@ -550,7 +615,37 @@ def render(r: dict) -> str:
             f"{times(r['needed'])} needed, but identical builds read this way "
             f"{odds} times; record {next_stage(n)} runs of each to settle it"
         )
-    return "\n".join([first, noise, verdict])
+    lines = [first, noise, verdict]
+    if r["verdict"] != "same" and "where" in r:
+        lines += located(r["where"])
+    return "\n".join(lines)
+
+
+def located(w: dict) -> list[str]:
+    """Where the builds differ most, for a reader about to debug it."""
+    unit = "chunks" if w["part"] == "probes" else "prompts"
+    head = (
+        f"Where: {w['part']}, {w['beyond']} of {w['items']} {unit} differ more "
+        f"across builds than between reruns; most, {unit[:-1]} {w['item']}"
+    )
+    if w["part"] == "probes":
+        return [
+            f"{head}, at position {w['position']} (token ids, probabilities)",
+            f"  reference: {w['reference']}",
+            f"  candidate: {w['candidate']}",
+        ]
+    if w["position"] is None:
+        return [f"{head}, whose first runs generate the same tokens"]
+    lines = [f"{head}, whose outputs first differ at token {w['position']}"]
+    if "candidate" in w:
+        a, b = w["reference"], w["candidate"]
+        same = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        start = max(0, same - 40)
+        lines += [
+            f"  reference: {'…' * (start > 0)}{a[start : same + 60]!r}",
+            f"  candidate: {'…' * (start > 0)}{b[start : same + 60]!r}",
+        ]
+    return lines
 
 
 def next_stage(n: int) -> int:
