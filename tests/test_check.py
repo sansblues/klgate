@@ -100,3 +100,26 @@ def test_a_path_is_a_build_of_its_own_each_time(tmp_path):
     (tmp_path / "empty").mkdir()
     with pytest.raises(ValueError, match="holds no bin/python"):
         build.get(str(tmp_path / "empty"))
+
+
+def test_laying_files_over_a_build_leaves_other_builds_alone(tmp_path, monkeypatch):
+    # uv hardlinks every venv's files to one cache.
+    cache, site = tmp_path / "cache.py", tmp_path / "site" / "vllm"
+    site.mkdir(parents=True)
+    cache.write_text("old")
+    (site / "x.py").hardlink_to(cache)
+    (site / "gone.py").write_text("old")
+
+    class Reply:
+        def read(self):
+            return b"new"
+
+    monkeypatch.setattr(build.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": str(tmp_path / "site")})())
+    monkeypatch.setattr(build.urllib.request, "urlopen", lambda url, timeout: Reply())
+    build.overlay(tmp_path / "python", "a" * 40, [
+        {"filename": "vllm/x.py", "status": "modified"},
+        {"filename": "vllm/new/y.py", "status": "added"},
+        {"filename": "vllm/gone.py", "status": "removed"},
+    ])
+    assert (site / "x.py").read_text() == "new" and cache.read_text() == "old"
+    assert (site / "new" / "y.py").read_text() == "new" and not (site / "gone.py").exists()

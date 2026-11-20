@@ -154,7 +154,11 @@ def overlay(python: Path, sha: str, files: list[dict]) -> None:
             path = site / f["filename"]
             path.parent.mkdir(parents=True, exist_ok=True)
             url = Raw.format(sha=sha, path=urllib.parse.quote(f["filename"]))
-            path.write_bytes(urllib.request.urlopen(url, timeout=Timeout).read())
+            new = urllib.request.urlopen(url, timeout=Timeout).read()
+            # uv hardlinks a venv's files to its cache, which other builds share:
+            # writing in place would change them all.
+            path.unlink(missing_ok=True)
+            path.write_bytes(new)
 
 
 def differences(reference: Path, candidate: Path) -> list[str]:
