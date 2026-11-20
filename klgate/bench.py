@@ -6,8 +6,9 @@ identical-code commits), a candidate build (the buggy parent, or the other commi
 model and server settings. Its kind is "known" (a bug klgate was built on), "unseen" (a
 bug picked by a rule fixed before running) or "same" (identical engine code).
 
-A replay records every stage's runs, so the table can say what a check would read
-whichever of them it happened to record first.
+A replay records every stage's runs. The table reads all of them, then says what a
+check costs on average over every choice of the runs it might have recorded first, and
+how often it would have found the change.
 
 Usage:
   klgate bench                             # every result in data/, decided again; CPU, seconds
@@ -76,16 +77,17 @@ def table() -> str:
                 d = drift.decide(matrices, n)
                 reached, launches = staged(matrices)
                 part = max(d["ratios"], key=d["ratios"].get)
+                found = "" if d["verdict"] == "same" else f", which finds it {100 * reached:3.0f} % of the time"
                 lines.append(
                     f"  {e['id']:20} {r['gpu'].removeprefix('NVIDIA '):18} {n} runs  "
                     f"{WORDS[d['verdict']]:8} {times(d['score']):>9} {part:8} needed {times(d['needed']):>6}  "
-                    f"reached in {100 * reached:3.0f} % of orders, {launches:4.1f} launches  {r.get('note', '')}".rstrip())
+                    f"{launches:4.1f} launches{found}  {r.get('note', '')}".rstrip())
     return "\n".join(lines[1:])
 
 
 def staged(matrices: dict[str, np.ndarray]) -> tuple[float, float]:
-    """How often a staged check gets as far as all of these runs, over every choice of
-    the runs it records first, and the server launches it takes on average."""
+    """How often a check gets as far as all of these runs, over every choice of the runs
+    it records first, and the server launches it takes on average."""
     n = len(matrices["probes"]) // 2
     stages = [s for s in drift.STAGES if s < n]
 

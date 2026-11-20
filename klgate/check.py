@@ -61,7 +61,7 @@ def main() -> None:
     print(drift.render(result))
     if differ := result["packages"]:
         more = f" and {len(differ) - 5} more" if len(differ) > 5 else ""
-        print(f"The builds' packages differ too, which can change outputs: {', '.join(differ[:5])}{more}")
+        print(f"The builds' other packages differ too, which can change outputs: {', '.join(differ[:5])}{more}")
     if a.json:
         a.json.write_text(json.dumps(drift.jsonable(result), indent=2) + "\n")
     raise SystemExit(EXIT[result["verdict"]])

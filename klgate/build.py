@@ -9,6 +9,7 @@ changes to Python only; a commit that changes compiled code has to be built by h
 import hashlib
 import json
 import os
+import platform
 import re
 import subprocess
 import time
@@ -31,6 +32,8 @@ Ancestors = 30  # commits to look back through for one with a wheel
 Ignored = re.compile(r"(tests|docs|examples|benchmarks|tools|docker|recipes|\.[^/]+)/|[^/]*\.md$|\.[^/]*$|(DCO|LICENSE|mkdocs\.yaml)$")
 # Files that can be laid over an installed wheel.
 Overlaid = re.compile(r"vllm/.*\.(py|json|jinja|yaml|yml|txt)$")
+# Packages whose version is likeliest to change what a server computes.
+Numeric = re.compile(r"torch|triton|cuda|nvidia|flashinfer|numpy|transformers|tokenizers|tvm|tilelang|numba|safetensors|compressed")
 
 
 class Build(NamedTuple):
@@ -89,8 +92,12 @@ def install(sha: str, packages: Sequence[str] = ()) -> Path:
     if not (venv / ".done").exists():
         base, files = source(sha)
         wheel = find_wheel(base)
+        # Its dependencies as they were on the day of the commit, so that two builds
+        # installed months apart don't differ by what was released in between.
+        day = json.loads(fetch(f"{Api}commits/{base}"))["commit"]["committer"]["date"]
         subprocess.run(["uv", "venv", "-q", "--clear", "--python", Python, str(venv)], check=True)
-        subprocess.run(["uv", "pip", "install", "-q", "--python", str(python), wheel], check=True)
+        subprocess.run(["uv", "pip", "install", "-q", "--python", str(python), "--exclude-newer", day, wheel],
+                       check=True)
         overlay(python, sha, files)
         (venv / ".done").write_text(f"{wheel}\n" + "".join(f"{f['status']} {f['filename']}\n" for f in files))
     if packages:
@@ -151,7 +158,8 @@ def overlay(python: Path, sha: str, files: list[dict]) -> None:
 
 
 def differences(reference: Path, candidate: Path) -> list[str]:
-    """The installed packages that differ between two environments, vLLM aside."""
+    """The installed packages that differ between two environments, vLLM aside, those
+    likeliest to change outputs first."""
 
     def packages(python: Path) -> dict[str, str]:
         freeze = subprocess.run(["uv", "pip", "freeze", "--python", str(python)], capture_output=True, text=True)
@@ -161,7 +169,7 @@ def differences(reference: Path, candidate: Path) -> list[str]:
     a, b = packages(reference), packages(candidate)
     return [
         f"{name} {a.get(name, 'absent')} → {b.get(name, 'absent')}"
-        for name in sorted(a.keys() | b.keys())
+        for name in sorted(a.keys() | b.keys(), key=lambda name: (not Numeric.search(name), name))
         if name != "vllm" and a.get(name) != b.get(name)
     ]
 
@@ -183,13 +191,13 @@ def has_wheel(sha: str) -> bool:
 def find_wheel(sha: str) -> str:
     names = wheels(sha)
     if not names:
-        raise ValueError(f"no x86_64 wheel listed at {WheelIndex.format(sha=sha)}")
+        raise ValueError(f"no {platform.machine()} wheel listed at {WheelIndex.format(sha=sha)}")
     return urllib.parse.urljoin(WheelIndex.format(sha=sha), names[0])
 
 
 def wheels(sha: str) -> list[str]:
     html = urllib.request.urlopen(WheelIndex.format(sha=sha), timeout=Timeout).read().decode()
-    return re.findall(r'href="([^"]*x86_64\.whl)"', html)
+    return re.findall(rf'href="([^"]*{platform.machine()}\.whl)"', html)
 
 
 def fetch(url: str, accept: str = "application/vnd.github+json") -> str:
