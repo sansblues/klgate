@@ -39,6 +39,7 @@ def fake_run(probes: np.ndarray, traffic: np.ndarray, seed: int) -> dict:
             "probe_tokens": np.zeros(probes.shape[:2], np.int64),
             "probe_ids": ids,
             "probe_lp": top_lp,
+            "probe_own": top4(probes)[0][..., 0],
             "meta": META | {"seed": seed},
         }
         | generated(probes[:, ::-1], "decode")
@@ -337,7 +338,7 @@ def test_server_responses_become_arrays():
             "logprobs": {
                 "top_logprobs": [
                     {"token_id:7": -0.1, "token_id:9": -2.5},
-                    {"token_id:3": -0.3, "token_id:7": -1.0, "token_id:5": -4.0},
+                    {"token_id:3": -0.3, "token_id:7": -2.0, "token_id:5": -4.0},
                 ]
             },
         },
@@ -348,7 +349,7 @@ def test_server_responses_become_arrays():
     assert run["traffic_text"].tolist() == [" seven three", ""]
     assert run["traffic_tokens"][0, :3].tolist() == [7, 3, -1]
     assert run["traffic_ids"][0, 1, :4].tolist() == [3, 7, 5, -1]
-    assert run["traffic_lp"][0, 1, :3].tolist() == pytest.approx([-0.3, -1.0, -4.0])
+    assert run["traffic_lp"][0, 1, :3].tolist() == pytest.approx([-0.3, -2.0, -4.0])
 
     chunks = (
         np.arange(drift.CHUNKS * drift.CONTEXT).reshape(drift.CHUNKS, drift.CONTEXT)
@@ -369,6 +370,18 @@ def test_server_responses_become_arrays():
     first = drift.CONTEXT // 2
     assert run["probe_tokens"].tolist() == chunks[:, first:].tolist()
     assert run["probe_ids"][0, 0, 0] == 1
+    # A token's own logprob is kept, -0.5 where the token is the listed 1.
+    assert set(run["probe_own"].ravel().tolist()) == {-6.0, -0.5}
+
+    logits = [
+        {
+            "token_ids": [7],
+            "text": "",
+            "logprobs": {"top_logprobs": [{"token_id:7": 3.0}]},
+        }
+    ]
+    with pytest.raises(ValueError, match="can't be logprobs"):
+        drift.generated_arrays(logits, "traffic", drift.TRAFFIC_TOKENS)
 
     with pytest.raises(ValueError, match="1 logprobs for 2"):
         drift.generated_arrays(
@@ -452,3 +465,19 @@ def test_a_change_is_located():
         drift.item_kls(drift.probe_kls, refs + cands), "probes", refs[0], cands[0]
     )
     assert (w["item"], w["position"], w["beyond"]) == (2, 5, 1)
+
+
+def test_the_first_runs_say_how_far_the_text_likelihood_moved():
+    rng = np.random.default_rng(18)
+    probes, traffic = world(rng)
+    worse = probes.copy()
+    worse[..., 0] -= 0.5  # the text's own tokens get less likely
+    s = drift.stats(fake_run(probes, traffic, 0), fake_run(worse, traffic, 1))
+    assert s["nll_change"] > 0.01
+    assert "NLL +" in drift.render(
+        drift.compare(
+            reruns(rng, probes, traffic, REF), reruns(rng, worse, traffic, CAND)
+        )
+    )
+    old = {k: v for k, v in fake_run(probes, traffic, 0).items() if k != "probe_own"}
+    assert "nll_change" not in drift.stats(old, fake_run(worse, traffic, 1))

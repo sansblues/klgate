@@ -189,6 +189,7 @@ def generated_arrays(choices: list[dict], part: str, length: int) -> dict:
             ranked = {int(k.removeprefix("token_id:")): v for k, v in top.items()}
             put(run["ids"][i, t], run["lp"][i, t], ranked)
     run["text"] = np.array([choice["text"] for choice in choices])
+    require_logprobs(run["lp"])
     return {f"{part}_{k}": v for k, v in run.items()}
 
 
@@ -199,6 +200,8 @@ def probe_arrays(choices: list[dict], chunks: np.ndarray) -> dict[str, np.ndarra
         "probe_tokens": chunks[:, first:],
         "probe_ids": np.full((CHUNKS, scored, TOP_K), -1, np.int32),
         "probe_lp": np.full((CHUNKS, scored, TOP_K), -np.inf, np.float32),
+        # Each scored token's own logprob, which vLLM returns whatever its rank.
+        "probe_own": np.full((CHUNKS, scored), np.nan, np.float32),
     }
     for i, choice in enumerate(choices):
         rows = choice["prompt_logprobs"]
@@ -210,7 +213,19 @@ def probe_arrays(choices: list[dict], chunks: np.ndarray) -> dict[str, np.ndarra
         for t in range(first, CONTEXT):
             row = {int(k): v["logprob"] for k, v in rows[t].items()}
             put(run["probe_ids"][i, t - first], run["probe_lp"][i, t - first], row)
+            run["probe_own"][i, t - first] = row.get(int(chunks[i, t]), np.nan)
+    require_logprobs(run["probe_lp"])
     return run
+
+
+def require_logprobs(lp: np.ndarray) -> None:
+    """Exit unless each position's values can be logprobs: a server started with
+    another --logprobs-mode returns logits, whose KL means nothing."""
+    if (np.exp(lp.astype(np.float64)).sum(axis=-1) > 1 + 1e-3).any():
+        raise ValueError(
+            "the server returned values that can't be logprobs: serve with the "
+            "default --logprobs-mode"
+        )
 
 
 def put(ids_out: np.ndarray, lp_out: np.ndarray, logprobs: dict[int, float]) -> None:
@@ -572,11 +587,16 @@ def stats(ref: dict, cand: dict) -> dict:
     # Outputs are padded with -1 past their end, so outputs of different
     # lengths differ here too.
     differ = ref["traffic_tokens"] != cand["traffic_tokens"]
-    return {
+    found = {
         "kl": float(kl.mean()),
         "same_top": float((ids_a[..., 0] == ids_b[..., 0]).mean()),
         "outputs_differ": float(differ.any(axis=1).mean()),
     }
+    if "probe_own" in ref and "probe_own" in cand:
+        # The text's mean negative log-likelihood: higher is a worse model.
+        nll = [-float(np.nanmean(run["probe_own"])) for run in (ref, cand)]
+        found["nll_change"] = nll[1] / nll[0] - 1
+    return found
 
 
 def render(r: dict) -> str:
@@ -584,8 +604,9 @@ def render(r: dict) -> str:
         return f"{x:,.2f}×" if math.isfinite(x) else "∞×"
 
     s, ratios, n = r["stats"], r["ratios"], r["runs"]
+    nll = f"NLL {100 * s['nll_change']:+.3f} %, " if "nll_change" in s else ""
     first = (
-        f"First runs: probe KL {s['kl']:.6f}, same top token "
+        f"First runs: probe KL {s['kl']:.6f}, {nll}same top token "
         f"{100 * s['same_top']:.2f} %, "
         f"{100 * s['outputs_differ']:.1f} % of outputs differ"
     )

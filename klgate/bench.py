@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import functools
 import itertools
 import json
 import shlex
@@ -91,6 +92,7 @@ def staged(matrices: dict[str, np.ndarray]) -> tuple[float, float]:
     n = len(matrices["probes"]) // 2
     stages = [s for s in drift.STAGES if s < n]
 
+    @functools.cache
     def differ(ref: tuple[int, ...], cand: tuple[int, ...]) -> bool:
         keep = [*ref, *(n + i for i in cand)]
         sub = {part: m[np.ix_(keep, keep)] for part, m in matrices.items()}
