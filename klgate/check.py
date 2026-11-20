@@ -43,6 +43,8 @@ def main() -> None:
     ap.add_argument("--args", default=ARGS, help=f"server arguments (default: {ARGS})")
     ap.add_argument("--env", action="append", default=[], metavar="K=V", help="server environment")
     ap.add_argument("--out", type=Path, default=Path("runs"), help="where runs are kept (default: runs)")
+    ap.add_argument("--full", action="store_true",
+                    help="record 7 runs of each build even if they read the same sooner: the most sensitive check")
     ap.add_argument("--json", type=Path, help="also write the result here")
     a = ap.parse_args()
     if (a.pr is None) == (len(a.builds) != 2):
@@ -52,7 +54,7 @@ def main() -> None:
     env = ENV | dict(kv.split("=", 1) for kv in a.env)
     try:
         reference, candidate = a.builds or build.pull(a.pr)
-        result = check(reference, candidate, a.model, shlex.split(a.args), env, a.out)
+        result = check(reference, candidate, a.model, shlex.split(a.args), env, a.out, full=a.full)
     except Exception as e:  # the exit code is the verdict, so no failure may exit 1
         print(e if isinstance(e, ValueError) else repr(e), file=sys.stderr)
         raise SystemExit(2) from None

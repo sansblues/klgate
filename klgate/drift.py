@@ -43,6 +43,7 @@ import json
 import math
 import secrets
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -237,7 +238,9 @@ def gpu_name() -> str:
     """The GPU type, as vLLM names it."""
     try:
         query = ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader", "-i", "0"]
-        return subprocess.run(query, check=False, capture_output=True, text=True).stdout.strip()
+        return subprocess.run(
+            query, check=False, capture_output=True, text=True
+        ).stdout.strip()
     except OSError:
         return "unknown"
 
@@ -336,12 +339,18 @@ def where(kls: np.ndarray, part: str, ref: dict, cand: dict) -> dict:
         position = int(np.argmax(kl))
         return found | {
             "position": position,
-            "reference": top(ref["probe_ids"][item, position], ref["probe_lp"][item, position]),
-            "candidate": top(cand["probe_ids"][item, position], cand["probe_lp"][item, position]),
+            "reference": top(
+                ref["probe_ids"][item, position], ref["probe_lp"][item, position]
+            ),
+            "candidate": top(
+                cand["probe_ids"][item, position], cand["probe_lp"][item, position]
+            ),
         }
     a, b = ref[f"{part}_tokens"][item], cand[f"{part}_tokens"][item]
     differ = np.flatnonzero(a != b)
-    texts = [str(run[f"{part}_text"][item]) for run in (ref, cand) if f"{part}_text" in run]
+    texts = [
+        str(run[f"{part}_text"][item]) for run in (ref, cand) if f"{part}_text" in run
+    ]
     return found | {
         "position": int(differ[0]) if len(differ) else None,
         **dict(zip(("reference", "candidate"), texts)),
@@ -350,7 +359,9 @@ def where(kls: np.ndarray, part: str, ref: dict, cand: dict) -> dict:
 
 def top(ids: np.ndarray, lp: np.ndarray) -> str:
     """A position's three likeliest tokens with their probabilities."""
-    return ", ".join(f"{int(i)} ({math.exp(float(x)):.3f})" for i, x in zip(ids[:3], lp[:3]))
+    return ", ".join(
+        f"{int(i)} ({math.exp(float(x)):.3f})" for i, x in zip(ids[:3], lp[:3])
+    )
 
 
 def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
@@ -485,35 +496,17 @@ def mean(values: np.ndarray) -> float:
 
 
 def item_kls(divergence, runs: list[dict]) -> np.ndarray:
-    """[i][j] is KL(run i || run j) by item."""
-    return np.array(
-        [
-            [divergence(a, b) if i != j else 0 * divergence(a, b) for j, b in enumerate(runs)]
-            for i, a in enumerate(runs)
-        ]
-    )
-
-
-def kl_matrix(divergence, runs: list[dict]) -> np.ndarray:
-    return np.array(
-        [
-            [0.0 if i == j else divergence(a, b) for j, b in enumerate(runs)]
-            for i, a in enumerate(runs)
-        ]
-    )
-
-
-def probe_kl(a: dict, b: dict) -> float:
-    return float(probe_kls(a, b).mean())
+    """[i][j] is KL(run i || run j) by item, and 0 for a run with itself."""
+    kls = [[None if a is b else divergence(a, b) for b in runs] for a in runs]
+    zero = np.zeros_like(kls[0][1])
+    return np.array([[zero if kl is None else kl for kl in row] for row in kls])
 
 
 def probe_kls(a: dict, b: dict) -> np.ndarray:
     """Each chunk's mean KL over its positions."""
-    return bucketed_kl(a["probe_ids"], a["probe_lp"], b["probe_ids"], b["probe_lp"]).mean(axis=-1)
-
-
-def generated_kl(a: dict, b: dict, part: str) -> float:
-    return float(generated_kls(a, b, part).mean())
+    return bucketed_kl(
+        a["probe_ids"], a["probe_lp"], b["probe_ids"], b["probe_lp"]
+    ).mean(axis=-1)
 
 
 def generated_kls(a: dict, b: dict, part: str) -> np.ndarray:
@@ -602,7 +595,8 @@ def render(r: dict) -> str:
     if r["verdict"] == "same":
         verdict = (
             f"Verdict: same within noise, {times(r['score'])} is not above the "
-            f"{times(r['needed'])} needed (p = {r['p']:.4f} over {r['splits']:,} splits)"
+            f"{times(r['needed'])} needed (p = {r['p']:.4f} over {r['splits']:,} "
+            "splits)"
         )
     elif r["verdict"] == "changed":
         verdict = (
@@ -639,7 +633,9 @@ def located(w: dict) -> list[str]:
     lines = [f"{head}, whose outputs first differ at token {w['position']}"]
     if "candidate" in w:
         a, b = w["reference"], w["candidate"]
-        same = next((i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b)))
+        same = next(
+            (i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b))
+        )
         start = max(0, same - 40)
         lines += [
             f"  reference: {'…' * (start > 0)}{a[start : same + 60]!r}",
@@ -684,8 +680,9 @@ def main() -> None:
     args = ap.parse_args()
     try:
         command(args)
-    except ValueError as e:
-        raise SystemExit(e) from None
+    except ValueError as e:  # 1 is the exit code of a change
+        print(e, file=sys.stderr)
+        raise SystemExit(2) from None
 
 
 def command(args: argparse.Namespace) -> None:

@@ -5,44 +5,57 @@ Does a new vLLM build change your model's outputs?
 Some vLLM bugs change what a model computes without breaking anything you'd notice: a value
 rounded to bf16 too early, a stale KV block reused. Answers barely move, accuracy stays
 within noise, every test passes, and the bug ships. vLLM's own GSM8K check, which fails on
-an 8-point accuracy drop, caught only 1 of the 7 such bugs replayed here.
+an 8-point accuracy drop, caught only 1 of the 7 such bugs klgate was built on.
 
 Comparing outputs directly doesn't work either, because a build doesn't reproduce itself:
 batches form differently each run, and every fresh server compiles and tunes its kernels
 its own way. So klgate asks a narrower question: does the new build differ from the old one
-by more than the old one differs from itself? It runs each build several times, compares
+by more than the old one differs from itself? It runs each build a few times, compares
 their token probabilities, and answers CHANGED or same, with no thresholds to tune.
 
 ## Usage
 
-```sh
-uv run klgate check <reference> <candidate> --model <model>
-```
-
-The builds are vLLM commits, branches or tags. For example, this replays the bug fixed in
-[#53877](https://github.com/vllm-project/vllm/pull/53877), with the fix as the reference
-and its buggy parent as the candidate:
+Check a pull request against the commit it branched from:
 
 ```sh
-uv run klgate check 56058fd5 87b9b5b8 --model Qwen/Qwen3.5-0.8B \
-  --args "--enforce-eager --gpu-memory-utilization 0.6 --max-model-len 2048 --max-num-seqs 32 --limit-mm-per-prompt '{\"image\": 0, \"video\": 0}'"
+uv run klgate check --pr 67789 --model Qwen/Qwen3-0.6B
 ```
 
-On an A40 it printed:
+Or any two builds, the reference first:
 
-```text
-First runs: probe KL 0.000183, same top token 99.54 %, 30.4 % of outputs differ
-Across builds over rerun noise: probes 0.99×, decode 3.59×, traffic 0.98×
-Verdict: CHANGED, 3.59× is above the 1.25× needed (p = 0.0040 over 252 splits, alpha 0.05)
+```sh
+uv run klgate check v0.33.0 main --model Qwen/Qwen3-0.6B
 ```
 
-The bug rounded a value to bf16 in the decode kernel, so only decode shows it.
+A build is a vLLM tag, branch or commit, or the path of a Python environment you installed
+vLLM into yourself. Pass the server arguments (`--args`) and environment (`--env K=V`) you
+serve with, since a check covers only the code they run.
 
-Pass the server arguments (`--args`) and environment (`--env K=V`) you serve with, since a
-check covers only the code they run. Each build runs 5 times (`--runs`, 4 to 8), each time
-on a fresh server with empty caches; that takes about half an hour for a small model on an
-A40, mostly server startups. Builds install from vLLM's per-commit wheels into
-`~/.cache/klgate/builds`, about 9 GB each. Runs are kept in `runs/`, so rerunning resumes.
+EXAMPLE
+
+The exit code is 0 for same, 1 for CHANGED and 2 for an error, and `--json` writes the
+result to a file.
+
+### What it costs
+
+Every run needs a fresh server, so the cost is server launches, about two minutes each for
+a small model:
+
+| The builds | Launches |
+|---|---|
+| read the same | 4, sometimes 10 |
+| changed | 14 |
+| read the same, and the reference was checked before | 2, sometimes 5 |
+
+klgate starts with 2 runs of each build and records more only while they differ. Runs are
+kept in `runs/`, so a reference build is recorded once however many candidates you compare
+with it, and an interrupted check resumes. `--full` records all 14 whatever the first
+runs read: the most sensitive check.
+
+Commits install from vLLM's per-commit wheels into `~/.cache/klgate/builds`, about 9 GB
+each. A commit without a wheel, such as a pull request's, installs from the nearest earlier
+commit that has one with its Python files laid over it; if it changes compiled code, build
+it yourself and pass its environment's path.
 
 ## How it works
 
@@ -60,33 +73,33 @@ For each kind, klgate divides the mean KL between the builds by the mean KL betw
 the same build. That's about 1 when nothing changed; the largest of the three is the score.
 
 To decide, it tries every way to split the runs into two groups. If the builds were the
-same, the real split would look like any other, so it reads CHANGED only when the real
-split scores above all but 5 % of them. Unchanged code reads CHANGED at most 5 % of the time,
-and a "same" says how large a change would have been caught.
+same, the real split would look like any other, so it would rarely score highest. When it
+does, the builds differ, and klgate records more runs to rule out chance:
+
+| Runs of each build | Identical builds differ | Then |
+|---|---|---|
+| 2 | 1 time in 3 | same: stop. Differ: 3 more |
+| 5 | 1 time in 126 | same: stop. Differ: 2 more |
+| 7 | 1 time in 1,716 | same, or CHANGED |
+
+So identical builds read CHANGED less than once in 1,716 checks, and a "same" says how
+large a change would have been caught.
 
 ## Does it work
 
 `uv run klgate bench` decides every replay again from its saved results in `data/`:
 
-| Replays | Result |
-|---|---|
-| 7 known bugs, used to design klgate | 6 caught |
-| 8 bugs it never saw, picked by a rule fixed beforehand ([how](bench/unseen.md)) | 6 caught |
-| 6 replays of 2 commit pairs with identical engine code | no false alarm |
-
-Of the misses, #32118 needs memory pressure this workload doesn't create, #41873 doesn't
-trigger under it, and #64279 struck only 3 of the 5 buggy runs. Among the catches, #60047
-changed no output token at all, and #41574 and #54048 stood out although reruns of their
-models disagree a thousand times more than usual.
+RESULTS
 
 To replay one: `uv run klgate bench bench/entries/<id>.toml`.
 
 ## Limits
 
-- It finds changes, not bugs. An intended numerics change reads CHANGED too.
+- It finds changes, not bugs. An intended numerics change reads CHANGED too; the output
+  then says how large it is and where it shows most.
 - It misses a change smaller than the one needed, and a bug that strikes too few runs.
-  More runs help.
+  `--full` helps.
+- It compares two builds serving one configuration, so a pull request that adds a
+  configuration, such as a new KV cache dtype, has nothing to be compared with.
+- It also reads CHANGED when the two builds' other packages differ, and says so.
 - It needs Linux on x86_64 and an NVIDIA GPU.
-
-klgate's eval is the same code as the one proposed for vLLM's eval catalog in
-[RFC #61698](https://github.com/vllm-project/vllm/issues/61698).
