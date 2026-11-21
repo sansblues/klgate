@@ -217,6 +217,13 @@ def probe_arrays(choices: list[dict], chunks: np.ndarray) -> dict[str, np.ndarra
             put(run["probe_ids"][i, t - first], run["probe_lp"][i, t - first], row)
             run["probe_own"][i, t - first] = row.get(int(chunks[i, t]), np.nan)
     require_logprobs(run["probe_lp"])
+    listed = int(np.isfinite(run["probe_lp"]).sum(axis=-1).min())
+    if listed < TOP_K:  # some builds list only the prompt's own token
+        print(
+            f"Warning: the server listed {listed} logprobs for a prompt position, "
+            f"not {TOP_K}, so the probes compare less than usual",
+            file=sys.stderr,
+        )
     return run
 
 

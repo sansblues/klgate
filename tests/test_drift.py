@@ -330,7 +330,7 @@ def test_generated_kl_matches_a_prompt_by_prompt_loop():
     assert kl(b, a, "traffic") == pytest.approx(slow(b, a), rel=1e-12)
 
 
-def test_server_responses_become_arrays():
+def test_server_responses_become_arrays(capsys):
     traffic = [
         {
             "token_ids": [7, 3],
@@ -367,6 +367,7 @@ def test_server_responses_become_arrays():
         for chunk in chunks
     ]
     run = drift.probe_arrays(probes, chunks)
+    assert "listed 1 logprobs" in capsys.readouterr().err  # the fake lists 1 or 2
     first = drift.CONTEXT // 2
     assert run["probe_tokens"].tolist() == chunks[:, first:].tolist()
     assert run["probe_ids"][0, 0, 0] == 1
