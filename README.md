@@ -89,7 +89,29 @@ large a change would have been caught.
 
 `uv run klgate bench` decides every replay again from its saved results in `data/`:
 
-RESULTS
+| Replays | Result |
+|---|---|
+| 7 known bugs, used to design klgate | 6 caught |
+| 8 bugs it never saw, picked by a rule fixed beforehand ([how](bench/unseen.md)) | 6 caught |
+| 1 bug raised in vLLM's [RFC #61698](https://github.com/vllm-project/vllm/issues/61698) as out of reach, on 2 models | missed |
+| 7 replays of 2 commit pairs with identical engine code, on 3 kinds of GPU | no false alarm, 5.6 launches each |
+
+Most replays hold 5 runs of each build, from before the stages; there a catch is the
+builds differing at 5 runs. The three recorded since hold 7: #42379 and #36580 read CHANGED,
+and an identical-code pair read the same.
+
+For each replay the table also says what a check costs on average, over every choice of the
+runs it might have recorded first, and how often it would have found the change. Stopping
+early costs one catch part of the time: #41574, whose model's reruns disagree a thousand
+times more than usual, is found by 60 % of checks; `--full` doesn't stop early.
+
+Of the misses, #32118 needs memory pressure this workload doesn't create, #41873 doesn't
+trigger under it, and #64279 struck only 3 of the 5 buggy runs. #67789 needs a chunked
+prefill to share a step with a longer fresh prompt, which these requests rarely if ever
+produce: traffic's prompts all hit one cached prefix, and the probes are all one length.
+Prompts of mixed lengths were tried for it and drowned in the noise of its quantized KV
+cache, where reruns of the fixed build disagreed a thousand times more than with a plain
+one. A test that asks the model for a fact from the start of its prompt catches that bug.
 
 To replay one: `uv run klgate bench bench/entries/<id>.toml`.
 

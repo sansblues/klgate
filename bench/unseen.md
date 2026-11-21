@@ -176,3 +176,22 @@ hides in it.
 So #67789 is replayed once more on unsloth/Meta-Llama-3.1-8B-Instruct, an open copy of the
 model its reporter used, with the same settings. Predicted: unsure. Caught, by the mixed
 passages, only if TurboQuant's own rerun noise is far smaller on a model this size.
+
+### Results
+
+| PR | Predicted | Result | Score (needed) |
+|---|---|---|---|
+| #67789, Qwen/Qwen3-0.6B | caught, medium | missed | 0.99× (1.13×), 7 runs |
+| #67789, Llama-3.1-8B | unsure | missed | 1.00× (2.14×), 7 runs |
+| #42782, #37054, #29867 | caught, gross | not scored | |
+
+- #67789: both predictions of a catch were wrong. Traffic's prompts all hit one cached
+  prefix and the probes are all one length, so a chunked prefill rarely if ever shares a
+  step with a longer fresh prompt. The mixed passages did make that happen, and read 1.08×
+  on the larger model: under this KV cache their reruns disagree too much, on both models,
+  for the bug to stand out. They caught nothing the other three kinds missed, on this bug
+  or on #36580 (30.9× there, against traffic's 5.6×, which was enough), so they were not
+  kept. The scores above are of the three kinds klgate has.
+- #37054 can't run on an A40: its FP8 kernel needs a newer GPU. It and #29867 then ran on
+  an L4, and #42782 on an RTX 4070 Ti, but the machines were lost before their results
+  were copied off them. They stay unscored.
