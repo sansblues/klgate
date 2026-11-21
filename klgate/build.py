@@ -96,8 +96,10 @@ def install(sha: str, packages: Sequence[str] = ()) -> Path:
         # installed months apart don't differ by what was released in between.
         day = json.loads(fetch(f"{Api}commits/{base}"))["commit"]["committer"]["date"]
         subprocess.run(["uv", "venv", "-q", "--clear", "--python", Python, str(venv)], check=True)
-        subprocess.run(["uv", "pip", "install", "-q", "--python", str(python), "--exclude-newer", day, wheel],
-                       check=True)
+        # Not quiet: a build is gigabytes of downloads, and uv says why one fails.
+        pip = ["uv", "pip", "install", "--python", str(python), "--exclude-newer", day, wheel]
+        if subprocess.run(pip).returncode:
+            raise ValueError(f"couldn't install {sha[:12]}: uv's message is above. Rerun to try again")
         overlay(python, sha, files)
         (venv / ".done").write_text(f"{wheel}\n" + "".join(f"{f['status']} {f['filename']}\n" for f in files))
     if packages:
