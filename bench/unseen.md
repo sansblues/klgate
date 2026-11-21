@@ -158,3 +158,20 @@ last chunk can share a step with a fresh prompt. Traffic may too, in its first s
 before the shared prefix is cached. Qwen/Qwen3-0.6B, A40, `--kv-cache-dtype turboquant_k8v4`.
 The fix is unmerged, so its build is the merge base's wheel with the PR's two Python files
 laid over it.
+
+### #67789 again, on a larger model
+
+Written 2026-11-21, after 3 of the 7 runs of each build on Qwen/Qwen3-0.6B and before any
+run on the larger model.
+
+On Qwen/Qwen3-0.6B the builds read the same so far, and the prediction above looks wrong.
+The replay also records a fourth kind of request, added tonight: 48 WikiText passages of 64
+to 1,536 tokens, each continued, all at once, so that chunked prefills share steps with
+fresh prompts. With a bf16 KV cache two reruns of one build differ there by a KL of 0.0008.
+With TurboQuant they differ by 0.88, in the fixed build too: whether a prompt's prefill is
+chunked decides whether it reads its own start exact or quantized, and this small model
+doesn't survive the difference. A bug that drops that start for a few prompts hides in it.
+
+So #67789 is replayed once more on unsloth/Meta-Llama-3.1-8B-Instruct, an open copy of the
+model its reporter used, with the same settings. Predicted: unsure. Caught, by the mixed
+passages, only if TurboQuant's own rerun noise is far smaller on a model this size.
