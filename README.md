@@ -31,7 +31,31 @@ A build is a vLLM tag, branch or commit, or the path of a Python environment you
 vLLM into yourself. Pass the server arguments (`--args`) and environment (`--env K=V`) you
 serve with, since a check covers only the code they run.
 
-EXAMPLE
+For example, this replays the bug fixed in
+[#42379](https://github.com/vllm-project/vllm/pull/42379), with the fix as the reference
+and its buggy parent as the candidate:
+
+```sh
+uv run klgate check 124fac10 e9499996 --model Qwen/Qwen3-0.6B \
+  --args "--enforce-eager --gpu-memory-utilization 0.55 --max-model-len 2048 --max-num-seqs 32"
+```
+
+On a laptop's RTX 3050 Ti, under WSL, which also needs `--env VLLM_USE_V2_MODEL_RUNNER=0`, it
+printed after 14 server launches:
+
+```text
+First runs: probe KL 0.001111, NLL -0.036 %, same top token 97.99 %, 43.6 % of outputs differ
+Across builds over rerun noise, 7 runs of each: probes ∞×, decode ∞×, traffic 1.14×
+Verdict: CHANGED, ∞× is above the 2.65× needed; identical builds read this way 1 in 1,716 times
+Where: probes, 32 of 32 chunks differ more across builds than between reruns; most, chunk 21, at position 404 (token ids, probabilities)
+  reference: 22235 (0.546), 6755 (0.147), 6569 (0.026)
+  candidate: 22235 (0.463), 6755 (0.181), 6569 (0.032)
+```
+
+The first line says how far apart the builds' first runs are, the second how each kind of
+request scores, and the last where the change shows most. Two commits with identical engine
+code, c0056b19 and e9499996, took 4 launches to read
+`same within noise, 0.87× is not above the 1.20× needed`.
 
 The exit code is 0 for same, 1 for CHANGED and 2 for an error, and `--json` writes the
 result to a file.
@@ -124,4 +148,6 @@ To replay one: `uv run klgate bench bench/entries/<id>.toml`.
 - It compares two builds serving one configuration, so a pull request that adds a
   configuration, such as a new KV cache dtype, has nothing to be compared with.
 - It also reads CHANGED when the two builds' other packages differ, and says so.
+- Comparing with a reference recorded earlier assumes the machine hasn't changed since.
+  That is untested beyond one sitting.
 - It needs Linux on x86_64 and an NVIDIA GPU.
