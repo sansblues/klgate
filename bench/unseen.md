@@ -193,5 +193,5 @@ passages, only if TurboQuant's own rerun noise is far smaller on a model this si
   or on #36580 (30.9× there, against traffic's 5.6×, which was enough), so they were not
   kept. The scores above are of the three kinds klgate has.
 - #37054 can't run on an A40: its FP8 kernel needs a newer GPU. It and #29867 then ran on
-  an L4, and #42782 on an RTX 4070 Ti, but the machines were lost before their results
-  were copied off them. They stay unscored.
+  an L4, and #42782 on an RTX 4070 Ti, but their results were not copied off the rented
+  machines before those stopped. They stay unscored.
