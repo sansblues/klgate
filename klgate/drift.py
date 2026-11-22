@@ -1,32 +1,8 @@
 """Logprob drift: does a candidate build change a model's outputs by more than
 reruns of the reference build differ from each other?
 
-`record` scores one run against a running server and saves it as a fingerprint:
-
-- Probes: fixed WikiText-2 chunks scored with prompt logprobs, as llama.cpp's
-  --kl-divergence does. Every position sees identical context, so a kernel that
-  rounds differently stands out even when no answer changes. Prompt logprobs
-  skip the prefix cache and never decode, though.
-- Decode: the first half of each chunk continued greedily, one request at a
-  time on an idle server, so decode kernels run without batching and reruns
-  usually repeat exactly.
-- Traffic: few-shot GSM8K prompts that share a prefix, generated greedily with
-  logprobs, more of them than fit in one batch. This runs what serving runs:
-  prefix caching, chunked prefill mixed with decode, CUDA-graph padding and KV
-  block reuse. Outputs are compared up to and including their first differing
-  token.
-
-`compare` scores each part as the mean KL across builds over the mean KL between
-reruns, takes the largest, and tests it with an exact permutation test over the
-runs: if the builds are the same, any split of the runs into two groups is as
-likely as the real one, so the real one rarely scores highest.
-
-Runs come in stages: 2 of the reference and 1 of the candidate, then 4 and 2,
-then 10 and 4. After each stage the builds either look the same, which ends the
-check, or separate, which calls for the next stage. Separating at the last one
-reads as changed: identical builds do that less than once in a thousand checks.
-The reference takes most of the runs because they are kept: the next candidate
-compared with it starts with one run of its own.
+`record` scores one run against a running server and saves it. `compare` decides
+from the runs of two builds whether they differ. README.md says how.
 
 The same code as vLLM's tests/evals/logprob_drift, apart from where the GSM8K
 prompts and the GPU name come from. Usage, against a new server with empty caches
@@ -43,6 +19,7 @@ import io
 import itertools
 import json
 import math
+import os
 import secrets
 import subprocess
 import sys
@@ -77,21 +54,23 @@ FORMAT = 3
 # Recording
 
 
-async def record(base_url: str, seed: int, setup: dict | None = None) -> dict:
-    """One run against the server at base_url, as a fingerprint.
+async def record(base_url: str, seed: int, setup: dict) -> dict:
+    """One run against the server at base_url.
 
     The seed shuffles the order requests are sent in, so batches differ per run.
     setup holds anything that must match between runs to compare them, such as
     the server's arguments.
     """
-    model = served_model(base_url)
+    model = get(f"{base_url}/v1/models")["data"][0]["id"]
     rng = np.random.default_rng(seed)
     prompts = gsm8k_prompts()
-    # About 4 characters a token, so this holds twice the tokens needed.
+    # The server's own tokens. About 4 characters a token, so this text holds
+    # twice the tokens needed.
     text = wiki_text()[: 8 * CHUNKS * CONTEXT]
-    ids = tokenize(base_url, model, text)
-    if len(ids) < CHUNKS * CONTEXT + 1:  # the cut may split the last token
-        raise ValueError(f"WikiText gave {len(ids)} tokens; {CHUNKS * CONTEXT} needed")
+    body = {"model": model, "prompt": text, "add_special_tokens": False}
+    response = requests.post(f"{base_url}/tokenize", json=body, timeout=120)
+    response.raise_for_status()
+    ids = response.json()["tokens"]
     chunks = np.array(ids[: CHUNKS * CONTEXT], np.int32).reshape(CHUNKS, CONTEXT)
 
     timeout = aiohttp.ClientTimeout(total=3600)
@@ -151,10 +130,10 @@ async def record(base_url: str, seed: int, setup: dict | None = None) -> dict:
     prompt_ids = json.dumps([c["prompt_token_ids"] for c in traffic]).encode()
     run["meta"] = {
         "format": FORMAT,
-        "vllm": requests.get(f"{base_url}/version", timeout=30).json()["version"],
+        "vllm": get(f"{base_url}/version")["version"],
         "seed": seed,
         "model": model,
-        "setup": setup or {},
+        "setup": setup,
         "gpu": gpu_name(),
         "data": {
             "prompts": hashlib.sha256(prompt_ids).hexdigest(),
@@ -163,6 +142,12 @@ async def record(base_url: str, seed: int, setup: dict | None = None) -> dict:
         },
     }
     return run
+
+
+def get(url: str) -> dict:
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+    return response.json()
 
 
 async def shuffled(bodies: list[dict], complete, rng: np.random.Generator) -> list:
@@ -174,11 +159,12 @@ async def shuffled(bodies: list[dict], complete, rng: np.random.Generator) -> li
 
 def generated_arrays(choices: list[dict], part: str, length: int) -> dict:
     n = len(choices)
-    run = {
+    out = {
         "tokens": np.full((n, length), -1, np.int32),
         "ids": np.full((n, length, TOP_K), -1, np.int32),
         "lp": np.full((n, length, TOP_K), -np.inf, np.float32),
         "lengths": np.zeros(n, np.int32),
+        "text": np.array([choice["text"] for choice in choices]),
     }
     for i, choice in enumerate(choices):
         tokens, tops = choice["token_ids"], choice["logprobs"]["top_logprobs"]
@@ -187,56 +173,32 @@ def generated_arrays(choices: list[dict], part: str, length: int) -> dict:
                 f"the server returned {len(tops)} logprobs for {len(tokens)} "
                 "generated tokens; this build can't be scored"
             )
-        run["lengths"][i] = len(tokens)
-        run["tokens"][i, : len(tokens)] = tokens
+        out["lengths"][i] = len(tokens)
+        out["tokens"][i, : len(tokens)] = tokens
         for t, top in enumerate(tops):
-            ranked = {int(k.removeprefix("token_id:")): v for k, v in top.items()}
-            put(run["ids"][i, t], run["lp"][i, t], ranked)
-    run["text"] = np.array([choice["text"] for choice in choices])
-    require_logprobs(run["lp"])
-    return {f"{part}_{k}": v for k, v in run.items()}
+            row = {int(k.removeprefix("token_id:")): v for k, v in top.items()}
+            put(out["ids"][i, t], out["lp"][i, t], row)
+    return {f"{part}_{k}": v for k, v in out.items()}
 
 
 def probe_arrays(choices: list[dict], chunks: np.ndarray) -> dict[str, np.ndarray]:
     first = CONTEXT // 2
     scored = CONTEXT - first
-    run = {
+    out = {
         "probe_tokens": chunks[:, first:],
         "probe_ids": np.full((CHUNKS, scored, TOP_K), -1, np.int32),
         "probe_lp": np.full((CHUNKS, scored, TOP_K), -np.inf, np.float32),
         # Each scored token's own logprob, which vLLM returns whatever its rank.
-        "probe_own": np.full((CHUNKS, scored), np.nan, np.float32),
+        "probe_own": np.zeros((CHUNKS, scored), np.float32),
     }
     for i, choice in enumerate(choices):
-        rows = choice["prompt_logprobs"]
-        if len(rows) != CONTEXT:
-            raise ValueError(
-                f"the server returned {len(rows)} prompt logprobs for a "
-                f"{CONTEXT}-token prompt"
-            )
         for t in range(first, CONTEXT):
-            row = {int(k): v["logprob"] for k, v in rows[t].items()}
-            put(run["probe_ids"][i, t - first], run["probe_lp"][i, t - first], row)
-            run["probe_own"][i, t - first] = row.get(int(chunks[i, t]), np.nan)
-    require_logprobs(run["probe_lp"])
-    listed = int(np.isfinite(run["probe_lp"]).sum(axis=-1).min())
-    if listed < TOP_K:  # some builds list only the prompt's own token
-        print(
-            f"Warning: the server listed {listed} logprobs for a prompt position, "
-            f"not {TOP_K}, so the probes compare less than usual",
-            file=sys.stderr,
-        )
-    return run
-
-
-def require_logprobs(lp: np.ndarray) -> None:
-    """Exit unless each position's values can be logprobs: a server started with
-    another --logprobs-mode returns logits, whose KL means nothing."""
-    if (np.exp(lp.astype(np.float64)).sum(axis=-1) > 1 + 1e-3).any():
-        raise ValueError(
-            "the server returned values that can't be logprobs: serve with the "
-            "default --logprobs-mode"
-        )
+            row = {
+                int(k): v["logprob"] for k, v in choice["prompt_logprobs"][t].items()
+            }
+            put(out["probe_ids"][i, t - first], out["probe_lp"][i, t - first], row)
+            out["probe_own"][i, t - first] = row[int(chunks[i, t])]
+    return out
 
 
 def put(ids_out: np.ndarray, lp_out: np.ndarray, logprobs: dict[int, float]) -> None:
@@ -244,20 +206,6 @@ def put(ids_out: np.ndarray, lp_out: np.ndarray, logprobs: dict[int, float]) -> 
     ranked = sorted(logprobs.items(), key=lambda kv: -kv[1])[:TOP_K]
     for k, (token, lp) in enumerate(ranked):
         ids_out[k], lp_out[k] = token, lp
-
-
-def served_model(base_url: str) -> str:
-    response = requests.get(f"{base_url}/v1/models", timeout=30)
-    response.raise_for_status()
-    return response.json()["data"][0]["id"]
-
-
-def tokenize(base_url: str, model: str, text: str) -> list[int]:
-    """The server's own tokens for text."""
-    body = {"model": model, "prompt": text, "add_special_tokens": False}
-    response = requests.post(f"{base_url}/tokenize", json=body, timeout=120)
-    response.raise_for_status()
-    return response.json()["tokens"]
 
 
 def gpu_name() -> str:
@@ -322,116 +270,29 @@ def compare(refs: list[dict], cands: list[dict]) -> dict:
     """Whether the candidate runs differ from the reference runs beyond noise."""
     check(refs, cands)
     runs = refs + cands
-    # Each part's KL between every two runs, by item: chunk or prompt.
-    items = {
-        "probes": item_kls(probe_kls, runs),
-        "decode": item_kls(functools.partial(generated_kls, part="decode"), runs),
-        "traffic": item_kls(functools.partial(generated_kls, part="traffic"), runs),
+    kl = {
+        "probes": probe_kls,
+        "decode": functools.partial(generated_kls, part="decode"),
+        "traffic": functools.partial(generated_kls, part="traffic"),
     }
+    # [i][j] is KL(run i || run j) by item, a chunk or a prompt.
+    items = {p: np.array([[kl[p](a, b) for b in runs] for a in runs]) for p in kl}
     matrices = {part: kls.mean(axis=-1) for part, kls in items.items()}
     result = decide(matrices, len(refs))
     part = max(result["ratios"], key=result["ratios"].get)
-    return (
-        {"stats": stats(refs[0], cands[0])}
-        | result
-        | {"where": where(items[part], part, len(refs), refs[0], cands[0])}
-        # Enough to redo the verdict without the runs.
-        | {"matrices": {part: m.tolist() for part, m in matrices.items()}}
-    )
-
-
-def where(kls: np.ndarray, part: str, n: int, ref: dict, cand: dict) -> dict:
-    """Where the builds differ most in a part, the reference's n runs first: how
-    many of its items differ more across builds than between any two reference
-    reruns, the one that does so most, and how the first runs of each build read
-    it."""
-    across = kls[:n, n:].mean(axis=(0, 1))
-    pairs = ~np.eye(n, dtype=bool)
-    within = kls[:n, :n][pairs].max(axis=0)
-    item = int(np.argmax(across - within))
-    found = {
-        "part": part,
-        "items": len(across),
-        "beyond": int((across > within).sum()),
-        "item": item,
-    }
-    if part == "probes":
-        kl = bucketed_kl(
-            ref["probe_ids"][item],
-            ref["probe_lp"][item],
-            cand["probe_ids"][item],
-            cand["probe_lp"][item],
-        )
-        position = int(np.argmax(kl))
-        return found | {
-            "position": position,
-            "reference": top(
-                ref["probe_ids"][item, position], ref["probe_lp"][item, position]
-            ),
-            "candidate": top(
-                cand["probe_ids"][item, position], cand["probe_lp"][item, position]
-            ),
-        }
-    a, b = ref[f"{part}_tokens"][item], cand[f"{part}_tokens"][item]
-    differ = np.flatnonzero(a != b)
-    texts = [
-        str(run[f"{part}_text"][item]) for run in (ref, cand) if f"{part}_text" in run
-    ]
-    return found | {
-        "position": int(differ[0]) if len(differ) else None,
-        **dict(zip(("reference", "candidate"), texts)),
-    }
-
-
-def top(ids: np.ndarray, lp: np.ndarray) -> str:
-    """A position's three likeliest tokens with their probabilities."""
-    return ", ".join(
-        f"{int(i)} ({math.exp(float(x)):.3f})" for i, x in zip(ids[:3], lp[:3])
-    )
-
-
-def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
-    """The verdict from each part's KL matrix between runs, the reference's n
-    runs first: [i][j] is KL(run i || run j).
-
-    A split's score is the largest of its ratios, each about 1 when nothing
-    changed. The builds separate when the real split scores above every other
-    one, which identical builds do with probability `chance`, 1 in the number
-    of splits. So the verdict is "same" when they don't separate, "changed"
-    when they do with enough runs for `chance` to be at most CHANCE, and "more"
-    when they do with fewer.
-    """
-    total = len(next(iter(matrices.values())))
-    ratios = np.array(
-        [
-            [score(m, part, ref) for part, m in matrices.items()]
-            for ref in splits(total, n)
-        ]
-    )
-    scores = ratios.max(axis=1)
-    chance = 1 / len(scores)
-    needed = float(scores[1:].max())  # the real split must beat every other
-    separated = scores[0] > needed
     return {
-        "ratios": dict(zip(matrices, ratios[0].tolist())),
-        "score": float(scores[0]),
-        "needed": needed,
-        "p": int((scores >= scores[0]).sum()) / len(scores),
-        "splits": len(scores),
-        "runs": (n, total - n),
-        "chance": chance,
-        "verdict": "same"
-        if not separated
-        else "changed"
-        if chance <= CHANCE
-        else "more",
+        "stats": stats(refs[0], cands[0]),
+        **result,
+        "where": where(items[part], part, len(refs), refs[0], cands[0]),
+        # Enough to redo the verdict without the runs.
+        "matrices": {part: m.tolist() for part, m in matrices.items()},
     }
 
 
 def check(refs: list[dict], cands: list[dict]) -> None:
-    """Exit unless the runs can be compared."""
-    # With as many candidate runs as reference runs, the reversed split ties the
-    # real one however large the change, and no split scores alone on top.
+    """Raise unless the runs can be compared."""
+    # With as many candidate runs as reference runs, a change from bit-identical
+    # reruns scores infinite for the reversed split too, and none is alone on top.
     most = STAGES[-1][0]
     if not 1 <= len(cands) < len(refs) <= most:
         raise ValueError(
@@ -444,36 +305,62 @@ def check(refs: list[dict], cands: list[dict]) -> None:
                 f"the {side} runs come from vLLM {', '.join(sorted(versions))}: "
                 "pass the runs of one build per side"
             )
-    seeds = [run["meta"]["seed"] for run in refs + cands]
-    if len(set(seeds)) < len(seeds):
-        raise ValueError("two runs share a seed: record each run with its own")
     runs = refs + cands
-    setups = [
-        {k: v for k, v in r["meta"].items() if k not in ("vllm", "seed")} for r in runs
-    ]
-    for setup in setups[1:]:
-        if differ := sorted(
-            k
-            for k in setup.keys() | setups[0].keys()
-            if setup.get(k) != setups[0].get(k)
-        ):
-            raise ValueError(
-                f"runs differ in {', '.join(differ)}: record every run with the "
-                "same model, server settings, GPU type and data"
-            )
-    for run in runs[1:]:
-        if not np.array_equal(run["probe_tokens"], runs[0]["probe_tokens"]):
-            raise ValueError("runs scored different probe tokens")
-    # The server can't send NaN, which JSON lacks, so a NaN means a corrupt file.
-    lps = ("probe_lp", "decode_lp", "traffic_lp")
-    if any(np.isnan(run[k]).any() for run in runs for k in lps):
-        raise ValueError("a run has NaN logprobs")
+    if len({run["meta"]["seed"] for run in runs}) < len(runs):
+        raise ValueError("two runs share a seed: record each run with its own")
+    first = runs[0]["meta"]
+    differ = {
+        k
+        for run in runs
+        for k in first.keys() - {"vllm", "seed"}
+        if run["meta"].get(k) != first[k]
+    }
+    if differ:
+        raise ValueError(
+            f"runs differ in {', '.join(sorted(differ))}: record every run with the "
+            "same model, server settings, GPU type and data"
+        )
+    if any((run["probe_tokens"] != runs[0]["probe_tokens"]).any() for run in runs):
+        raise ValueError("runs scored different probe tokens")
 
 
-def splits(total: int, n: int) -> list[tuple[int, ...]]:
-    """Every way to pick n of total runs as the reference, the real split first."""
+def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
+    """The verdict from each part's KL matrix between runs, the reference's n
+    runs first: [i][j] is KL(run i || run j).
+
+    A split's score is the largest of its ratios, each about 1 when nothing
+    changed. The builds separate when the real split scores above every other
+    one, which identical builds do 1 time in the number of splits. So the
+    verdict is "same" when they don't separate, "changed" when they do with
+    enough splits for that chance to be at most CHANCE, and "more" when they do
+    with fewer.
+    """
+    total = len(next(iter(matrices.values())))
     real = tuple(range(n))
-    return [real, *(s for s in itertools.combinations(range(total), n) if s != real)]
+    others = (s for s in itertools.combinations(range(total), n) if s != real)
+    ratios = np.array(
+        [
+            [score(m, part, ref) for part, m in matrices.items()]
+            for ref in (real, *others)
+        ]
+    )
+    scores = ratios.max(axis=1)
+    needed = float(scores[1:].max())  # the real split must beat every other
+    if scores[0] <= needed:
+        verdict = "same"
+    elif 1 / len(scores) <= CHANCE:
+        verdict = "changed"
+    else:
+        verdict = "more"
+    return {
+        "ratios": dict(zip(matrices, ratios[0].tolist())),
+        "score": float(scores[0]),
+        "needed": needed,
+        "p": int((scores >= scores[0]).sum()) / len(scores),
+        "splits": len(scores),
+        "runs": (n, total - n),
+        "verdict": verdict,
+    }
 
 
 def score(matrix: np.ndarray, part: str, ref: tuple[int, ...]) -> float:
@@ -501,13 +388,6 @@ def mean(values: np.ndarray) -> float:
     """The mean, independent of the values' order, so that splits with the same
     KLs tie exactly."""
     return math.fsum(values.ravel().tolist()) / values.size
-
-
-def item_kls(divergence, runs: list[dict]) -> np.ndarray:
-    """[i][j] is KL(run i || run j) by item, and 0 for a run with itself."""
-    kls = [[None if a is b else divergence(a, b) for b in runs] for a in runs]
-    zero = np.zeros_like(kls[0][1])
-    return np.array([[zero if kl is None else kl for kl in row] for row in kls])
 
 
 def probe_kls(a: dict, b: dict) -> np.ndarray:
@@ -580,106 +460,93 @@ def stats(ref: dict, cand: dict) -> dict:
     # Outputs are padded with -1 past their end, so outputs of different
     # lengths differ here too.
     differ = ref["traffic_tokens"] != cand["traffic_tokens"]
-    found = {
+    # The text's mean negative log-likelihood: higher is a worse model.
+    nll = [-float(run["probe_own"].mean()) for run in (ref, cand)]
+    return {
         "kl": float(kl.mean()),
+        "nll_change": nll[1] / nll[0] - 1,
         "same_top": float((ids_a[..., 0] == ids_b[..., 0]).mean()),
         "outputs_differ": float(differ.any(axis=1).mean()),
     }
-    if "probe_own" in ref and "probe_own" in cand:
-        # The text's mean negative log-likelihood: higher is a worse model.
-        nll = [-float(np.nanmean(run["probe_own"])) for run in (ref, cand)]
-        found["nll_change"] = nll[1] / nll[0] - 1
-    return found
+
+
+def where(kls: np.ndarray, part: str, n: int, ref: dict, cand: dict) -> list[str]:
+    """Where the builds differ most in a part, for a reader about to debug it:
+    the item that differs most across builds beyond its reruns, the reference's
+    n runs first, and how the first run of each build reads it."""
+    across = kls[:n, n:].mean(axis=(0, 1))
+    within = kls[:n, :n][~np.eye(n, dtype=bool)].max(axis=0)
+    item = int(np.argmax(across - within))
+    unit = "chunks" if part == "probes" else "prompts"
+    head = (
+        f"Where: {part}, {int((across > within).sum())} of {len(across)} {unit} differ "
+        f"more across builds than between reruns; most, {unit[:-1]} {item}"
+    )
+    if part == "probes":
+        a, b = ((run["probe_ids"][item], run["probe_lp"][item]) for run in (ref, cand))
+        t = int(np.argmax(bucketed_kl(*a, *b)))
+        tops = [
+            ", ".join(f"{i} ({math.exp(x):.3f})" for i, x in zip(ids[t, :3], lp[t, :3]))
+            for ids, lp in (a, b)
+        ]
+        return [
+            f"{head}, at position {t} (token ids, probabilities)",
+            f"  reference: {tops[0]}",
+            f"  candidate: {tops[1]}",
+        ]
+    a, b = (str(run[f"{part}_text"][item]) for run in (ref, cand))
+    same = len(os.path.commonprefix([a, b]))
+    start = max(0, same - 40)
+    return [
+        f"{head}, whose first runs' outputs agree for {same} characters",
+        f"  reference: {'…' * (start > 0)}{a[start : same + 60]!r}",
+        f"  candidate: {'…' * (start > 0)}{b[start : same + 60]!r}",
+    ]
 
 
 def render(r: dict) -> str:
     def times(x: float) -> str:
         return f"{x:,.2f}×" if math.isfinite(x) else "∞×"
 
-    s, ratios, (n, m) = r["stats"], r["ratios"], r["runs"]
-    nll = f"NLL {100 * s['nll_change']:+.3f} %, " if "nll_change" in s else ""
-    first = (
-        f"First runs: probe KL {s['kl']:.6f}, {nll}same top token "
-        f"{100 * s['same_top']:.2f} %, "
-        f"{100 * s['outputs_differ']:.1f} % of outputs differ"
-    )
-    parts = ", ".join(f"{part} {times(x)}" for part, x in ratios.items())
-    noise = (
-        f"Across builds over rerun noise, {n} reference and {m} candidate runs: {parts}"
-    )
-    odds = f"1 in {round(1 / r['chance']):,}"
+    stat, (n, m) = r["stats"], r["runs"]
+    got, needed = times(r["score"]), times(r["needed"])
+    parts = ", ".join(f"{part} {times(x)}" for part, x in r["ratios"].items())
+    odds = f"identical builds read this way 1 in {r['splits']:,} times"
     if r["verdict"] == "same":
         verdict = (
-            f"Verdict: same within noise, {times(r['score'])} is not above the "
-            f"{times(r['needed'])} needed (p = {r['p']:.4f} over {r['splits']:,} "
-            "splits)"
+            f"Verdict: same within noise, {got} is not above the {needed} needed "
+            f"(p = {r['p']:.4f} over {r['splits']:,} splits)"
         )
     elif r["verdict"] == "changed":
-        verdict = (
-            f"Verdict: CHANGED, {times(r['score'])} is above the "
-            f"{times(r['needed'])} needed; identical builds read this way {odds} times"
-        )
+        verdict = f"Verdict: CHANGED, {got} is above the {needed} needed; {odds}"
     else:
+        refs, cands = next((s for s in STAGES if s[1] > m), STAGES[-1])
         verdict = (
-            f"Undecided: the builds differ, {times(r['score'])} against the "
-            f"{times(r['needed'])} needed, but identical builds read this way "
-            f"{odds} times; the next stage takes {next_stage(n, m)}"
+            f"Undecided: the builds differ, {got} against the {needed} needed, "
+            f"but {odds}; the next stage takes {max(n, refs)} reference and {cands} "
+            "candidate runs"
         )
-    lines = [first, noise, verdict]
-    if r["verdict"] != "same" and "where" in r:
-        lines += located(r["where"])
-    return "\n".join(lines)
-
-
-def located(w: dict) -> list[str]:
-    """Where the builds differ most, for a reader about to debug it."""
-    unit = "chunks" if w["part"] == "probes" else "prompts"
-    head = (
-        f"Where: {w['part']}, {w['beyond']} of {w['items']} {unit} differ more "
-        f"across builds than between reruns; most, {unit[:-1]} {w['item']}"
+    first = (
+        f"First runs: probe KL {stat['kl']:.6f}, "
+        f"NLL {100 * stat['nll_change']:+.3f} %, "
+        f"same top token {100 * stat['same_top']:.2f} %, "
+        f"{100 * stat['outputs_differ']:.1f} % of outputs differ"
     )
-    if w["part"] == "probes":
-        return [
-            f"{head}, at position {w['position']} (token ids, probabilities)",
-            f"  reference: {w['reference']}",
-            f"  candidate: {w['candidate']}",
-        ]
-    if w["position"] is None:
-        return [f"{head}, whose first runs generate the same tokens"]
-    lines = [f"{head}, whose outputs first differ at token {w['position']}"]
-    if "candidate" in w:
-        a, b = w["reference"], w["candidate"]
-        same = next(
-            (i for i, (x, y) in enumerate(zip(a, b)) if x != y), min(len(a), len(b))
-        )
-        start = max(0, same - 40)
-        lines += [
-            f"  reference: {'…' * (start > 0)}{a[start : same + 60]!r}",
-            f"  candidate: {'…' * (start > 0)}{b[start : same + 60]!r}",
-        ]
-    return lines
-
-
-def next_stage(n: int, m: int) -> str:
-    """The runs to have next, with n of the reference and m of the candidate."""
-    refs, cands = next((s for s in STAGES if s[1] > m), STAGES[-1])
-    return f"{max(n, refs)} reference and {cands} candidate runs"
+    noise = f"Across builds over rerun noise, {n} reference and {m} candidate runs:"
+    where = r["where"] if r["verdict"] != "same" else []
+    return "\n".join([first, f"{noise} {parts}", verdict, *where])
 
 
 def jsonable(x):
-    """The value with infinite and NaN floats as strings, which JSON lacks."""
+    """The value with infinite floats as strings, which JSON lacks."""
     if isinstance(x, dict):
         return {k: jsonable(v) for k, v in x.items()}
-    if isinstance(x, float | np.floating) and not math.isfinite(x):
-        return str(float(x))
-    if isinstance(x, np.floating):
-        return float(x)
-    return x
+    return str(x) if isinstance(x, float) and not math.isfinite(x) else x
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    sub = ap.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
     rec = sub.add_parser("record", help="score one run against a running server")
     rec.add_argument("--host", default="http://127.0.0.1")
     rec.add_argument("--port", type=int, default=8000)
@@ -693,30 +560,23 @@ def main() -> None:
     cmp = sub.add_parser("compare", help="compare recorded runs")
     cmp.add_argument("--reference", type=Path, nargs="+", required=True)
     cmp.add_argument("--candidate", type=Path, nargs="+", required=True)
-    cmp.add_argument("--json", type=Path, help="also write the result here")
-    args = ap.parse_args()
-    try:
-        command(args)
-    except ValueError as e:  # 1 is the exit code of a change
-        print(e, file=sys.stderr)
-        raise SystemExit(2) from None
-
-
-def command(args: argparse.Namespace) -> None:
+    cmp.add_argument("--save-results", type=Path, help="Save results to JSON file")
+    args = parser.parse_args()
     if args.command == "record":
         seed = secrets.randbelow(2**31) if args.seed is None else args.seed
-        run = asyncio.run(
-            record(f"{args.host}:{args.port}", seed, json.loads(args.setup))
-        )
-        save(run, args.out)
-        print(json.dumps(run["meta"]))
+        url = f"{args.host}:{args.port}"
+        save(asyncio.run(record(url, seed, json.loads(args.setup))), args.out)
         return
     refs = [load(p) for p in args.reference]
     cands = [load(p) for p in args.candidate]
-    result = compare(refs, cands)
+    try:
+        result = compare(refs, cands)
+    except ValueError as e:  # 1 is the exit code of a change
+        print(e, file=sys.stderr)
+        raise SystemExit(2) from None
     print(render(result))
-    if args.json:
-        args.json.write_text(json.dumps(jsonable(result), indent=2) + "\n")
+    if args.save_results:
+        args.save_results.write_text(json.dumps(jsonable(result), indent=2) + "\n")
     raise SystemExit({"same": 0, "changed": 1, "more": 3}[result["verdict"]])
 
 
