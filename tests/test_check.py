@@ -16,10 +16,11 @@ def fake(monkeypatch, tmp_path):
     rng = np.random.default_rng(0)
     probes, traffic = world(rng)
     change = rng.normal(size=probes.shape)
-    state = {"shift": 0.0, "launches": 0}
+    state = {"shift": 0.0, "launches": 0, "order": []}
 
     def record(python, model, args, env, out):
         state["launches"] += 1
+        state["order"].append(python.name)
         seed = state["launches"]
         shift = 0.0 if python.name == "reference" else state["shift"]
         noisy = probes + shift * change + 0.01 * rng.normal(size=probes.shape)
@@ -32,23 +33,39 @@ def fake(monkeypatch, tmp_path):
     return state
 
 
-def test_builds_that_are_the_same_cost_four_launches(fake, tmp_path):
+def test_builds_that_are_the_same_cost_three_launches(fake, tmp_path):
     result = check.check("reference", "candidate", "m", [], {}, tmp_path)
-    assert (result["verdict"], result["runs"], fake["launches"]) == ("same", 2, 4)
+    assert (result["verdict"], result["runs"], fake["launches"]) == ("same", (2, 1), 3)
+    assert fake["order"] == ["reference", "candidate", "reference"]
 
 
 def test_a_change_takes_every_stage(fake, tmp_path):
     fake["shift"] = 0.1
     result = check.check("reference", "candidate", "m", [], {}, tmp_path)
-    assert (result["verdict"], result["runs"], fake["launches"]) == ("changed", 7, 14)
-    assert result["chance"] == 2 / math.comb(14, 7) <= drift.CHANCE
+    assert (result["verdict"], result["runs"], fake["launches"]) == ("changed", (10, 4), 14)
+    assert result["chance"] == 1 / math.comb(14, 4) <= drift.CHANCE
+    # The candidate's runs lie between the reference's.
+    assert "".join(name[0] for name in fake["order"]) == "rcr" "rcr" "rrcrrcrr"
 
 
-def test_recorded_runs_are_reused(fake, tmp_path):
+def test_a_recorded_reference_costs_the_next_candidate_one_launch(fake, tmp_path):
     check.check("reference", "candidate", "m", [], {}, tmp_path, full=True)
     assert fake["launches"] == 14
-    check.check("reference", "other", "m", [], {}, tmp_path)
-    assert fake["launches"] == 16  # the reference's runs were kept
+    result = check.check("reference", "other", "m", [], {}, tmp_path)
+    assert (result["verdict"], result["runs"], fake["launches"]) == ("same", (10, 1), 15)
+    fake["shift"] = 0.1
+    result = check.check("reference", "shifted", "m", [], {}, tmp_path)
+    assert (result["verdict"], result["runs"], fake["launches"]) == ("changed", (10, 4), 19)
+
+
+def test_a_check_resumes_from_the_runs_recorded(fake, tmp_path):
+    check.check("reference", "candidate", "m", [], {}, tmp_path)
+    assert fake["launches"] == 3
+    fake["shift"] = 0.1
+    # The reference holds 2 runs: a changed candidate records the other 8 and its own 4.
+    result = check.check("reference", "shifted", "m", [], {}, tmp_path)
+    assert (result["verdict"], result["runs"], fake["launches"]) == ("changed", (10, 4), 15)
+    assert "".join(name[0] for name in fake["order"][3:]) == "s" "rsr" "rrsrrsrr"
 
 
 def test_the_exit_code_is_the_verdict(fake, tmp_path, monkeypatch, capsys):

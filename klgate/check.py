@@ -1,15 +1,17 @@
 """Does a candidate vLLM build change a model's outputs beyond rerun noise?
 
-Installs both builds, then records runs of each, alternating, every run on a fresh
-server with empty caches, and compares them with klgate.drift. It starts with 2 runs of
-each build and records more only while the builds differ, so builds that are the same
-cost 4 server launches and a change costs 14.
+Installs both builds, then records runs of each, every run on a fresh server with empty
+caches, and compares them with klgate.drift. It starts with 2 runs of the reference and 1
+of the candidate and records more only while the builds differ, so builds that are the
+same cost 3 server launches and a change costs 14. The reference's runs are kept: the next
+candidate compared with it starts with 1 launch.
 """
 
 import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import secrets
 import shlex
@@ -44,7 +46,7 @@ def main() -> None:
     ap.add_argument("--env", action="append", default=[], metavar="K=V", help="server environment")
     ap.add_argument("--out", type=Path, default=Path("runs"), help="where runs are kept (default: runs)")
     ap.add_argument("--full", action="store_true",
-                    help="record 7 runs of each build even if they read the same sooner: the most sensitive check")
+                    help="record every stage's runs even if the builds read the same sooner: the most sensitive check")
     ap.add_argument("--json", type=Path, help="also write the result here")
     a = ap.parse_args()
     if (a.pr is None) == (len(a.builds) != 2):
@@ -74,13 +76,16 @@ def check(reference: str, candidate: str, model: str, args: list[str], env: dict
     builds = [build.get(spec, packages) for spec in (reference, candidate)]
     key = hashlib.sha256(json.dumps([model, args, env, list(packages)]).encode()).hexdigest()[:8]
     dirs = [out / f"{b.name}-{key}" for b in builds]
-    for stage in drift.STAGES:
-        # Alternating builds spreads any drift in the machine over both.
-        for i in range(stage):
-            for b, d in zip(builds, dirs):
-                if len(list(d.glob("*.npz"))) <= i:
+    for refs, cands in drift.STAGES:
+        for i in range(refs):
+            # The candidate's runs go between the reference's, which spreads any drift in
+            # the machine over both.
+            for b, d, due in zip(builds, dirs, (i + 1, math.ceil((i + 1) * cands / refs))):
+                if len(list(d.glob("*.npz"))) < due:
                     record(b.python, model, args, env, d)
-        result = drift.compare(*([drift.load(p) for p in sorted(d.glob("*.npz"))[:stage]] for d in dirs))
+        # Every reference run there is: one recorded for an earlier candidate counts too.
+        ref, cand = ([drift.load(p) for p in sorted(d.glob("*.npz"))] for d in dirs)
+        result = drift.compare(ref[: drift.STAGES[-1][0]], cand[:cands])
         if result["verdict"] != "more" and not full:
             break
     return result | {"packages": build.differences(*(b.python for b in builds))}

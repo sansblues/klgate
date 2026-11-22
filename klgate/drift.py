@@ -21,10 +21,12 @@ reruns, takes the largest, and tests it with an exact permutation test over the
 runs: if the builds are the same, any split of the runs into two groups is as
 likely as the real one, so the real one rarely scores highest.
 
-Runs come in stages of 2, 5 and 7 of each build. After each stage the builds
-either look the same, which ends the check, or separate, which calls for the
-next stage. Separating at 7 runs reads as changed: identical builds do that
-less than once in a thousand checks.
+Runs come in stages: 2 of the reference and 1 of the candidate, then 4 and 2,
+then 10 and 4. After each stage the builds either look the same, which ends the
+check, or separate, which calls for the next stage. Separating at the last one
+reads as changed: identical builds do that less than once in a thousand checks.
+The reference takes most of the runs because they are kept: the next candidate
+compared with it starts with one run of its own.
 
 The same code as vLLM's tests/evals/logprob_drift, apart from where the GSM8K
 prompts and the GPU name come from. Usage, against a new server with empty caches
@@ -65,9 +67,9 @@ WIKI_URL = (
 )
 WIKI_MEMBER = "wikitext-2-raw/wiki.test.raw"
 WIKI_SHA = "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08"
-STAGES = (2, 5, 7)  # runs of each build after which the builds are compared
+# Reference and candidate runs after which the builds are compared.
+STAGES = ((2, 1), (4, 2), (10, 4))
 CHANCE = 1e-3  # how often identical builds may read as changed
-MAX_RUNS = 8  # runs of each build; 8 + 8 split 12,870 ways, all enumerated
 TAIL_FLOOR = 1e-9
 FORMAT = 3
 
@@ -332,17 +334,17 @@ def compare(refs: list[dict], cands: list[dict]) -> dict:
     return (
         {"stats": stats(refs[0], cands[0])}
         | result
-        | {"where": where(items[part], part, refs[0], cands[0])}
+        | {"where": where(items[part], part, len(refs), refs[0], cands[0])}
         # Enough to redo the verdict without the runs.
         | {"matrices": {part: m.tolist() for part, m in matrices.items()}}
     )
 
 
-def where(kls: np.ndarray, part: str, ref: dict, cand: dict) -> dict:
-    """Where the builds differ most in a part: how many of its items differ more
-    across builds than between any two reference reruns, the one that does so
-    most, and how the first runs of each build read it."""
-    n = len(kls) // 2
+def where(kls: np.ndarray, part: str, n: int, ref: dict, cand: dict) -> dict:
+    """Where the builds differ most in a part, the reference's n runs first: how
+    many of its items differ more across builds than between any two reference
+    reruns, the one that does so most, and how the first runs of each build read
+    it."""
     across = kls[:n, n:].mean(axis=(0, 1))
     pairs = ~np.eye(n, dtype=bool)
     within = kls[:n, :n][pairs].max(axis=0)
@@ -393,32 +395,30 @@ def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
     runs first: [i][j] is KL(run i || run j).
 
     A split's score is the largest of its ratios, each about 1 when nothing
-    changed. p is the share of splits scoring at least as high as the real one.
-    The builds separate when only one other split does, since the reversed
-    split can tie the real one however large the change. Identical builds
-    separate with probability `chance`, so the verdict is "same" when they
-    don't, "changed" when they do with enough runs for `chance` to be at most
-    CHANCE, and "more" when they do with fewer.
+    changed. The builds separate when the real split scores above every other
+    one, which identical builds do with probability `chance`, 1 in the number
+    of splits. So the verdict is "same" when they don't separate, "changed"
+    when they do with enough runs for `chance` to be at most CHANCE, and "more"
+    when they do with fewer.
     """
+    total = len(next(iter(matrices.values())))
     ratios = np.array(
         [
             [score(m, part, ref) for part, m in matrices.items()]
-            for ref in splits(2 * n, n)
+            for ref in splits(total, n)
         ]
     )
     scores = ratios.max(axis=1)
-    total = len(scores)
-    p = int((scores >= scores[0]).sum()) / total
-    chance = 2 / total
-    separated = p <= chance
+    chance = 1 / len(scores)
+    needed = float(scores[1:].max())  # the real split must beat every other
+    separated = scores[0] > needed
     return {
         "ratios": dict(zip(matrices, ratios[0].tolist())),
         "score": float(scores[0]),
-        # The third highest score: the real split must beat it.
-        "needed": float(np.sort(scores)[::-1][2]),
-        "p": p,
-        "splits": total,
-        "runs": n,
+        "needed": needed,
+        "p": int((scores >= scores[0]).sum()) / len(scores),
+        "splits": len(scores),
+        "runs": (n, total - n),
         "chance": chance,
         "verdict": "same"
         if not separated
@@ -428,31 +428,15 @@ def decide(matrices: dict[str, np.ndarray], n: int) -> dict:
     }
 
 
-def staged(matrices: dict[str, np.ndarray]) -> dict:
-    """The verdict a staged check reaches on these runs: decide on the first 2
-    runs of each build, then 5, then 7, stopping once they read the same."""
-    n = len(next(iter(matrices.values()))) // 2
-    for stage in [s for s in STAGES if s < n] + [n]:
-        keep = [*range(stage), *range(n, n + stage)]
-        result = decide({p: m[np.ix_(keep, keep)] for p, m in matrices.items()}, stage)
-        if result["verdict"] == "same":
-            break
-    return result
-
-
 def check(refs: list[dict], cands: list[dict]) -> None:
     """Exit unless the runs can be compared."""
-    # Traffic noise comes from the reference side alone, so with more candidate
-    # runs than reference runs, every split that takes its reference side from
-    # quiet candidate runs can outscore the real one.
-    if len(refs) != len(cands):
+    # With as many candidate runs as reference runs, the reversed split ties the
+    # real one however large the change, and no split scores alone on top.
+    most = STAGES[-1][0]
+    if not 1 <= len(cands) < len(refs) <= most:
         raise ValueError(
-            f"{len(refs)} reference and {len(cands)} candidate runs: record as "
-            "many runs of each build"
-        )
-    if not STAGES[0] <= len(refs) <= MAX_RUNS:
-        raise ValueError(
-            f"{len(refs)} runs of each build: record {STAGES[0]} to {MAX_RUNS}"
+            f"{len(refs)} reference and {len(cands)} candidate runs: record 2 to "
+            f"{most} runs of the reference and fewer of the candidate"
         )
     for side, runs in (("reference", refs), ("candidate", cands)):
         if len(versions := {run["meta"]["vllm"] for run in runs}) > 1:
@@ -612,7 +596,7 @@ def render(r: dict) -> str:
     def times(x: float) -> str:
         return f"{x:,.2f}×" if math.isfinite(x) else "∞×"
 
-    s, ratios, n = r["stats"], r["ratios"], r["runs"]
+    s, ratios, (n, m) = r["stats"], r["ratios"], r["runs"]
     nll = f"NLL {100 * s['nll_change']:+.3f} %, " if "nll_change" in s else ""
     first = (
         f"First runs: probe KL {s['kl']:.6f}, {nll}same top token "
@@ -620,7 +604,9 @@ def render(r: dict) -> str:
         f"{100 * s['outputs_differ']:.1f} % of outputs differ"
     )
     parts = ", ".join(f"{part} {times(x)}" for part, x in ratios.items())
-    noise = f"Across builds over rerun noise, {n} runs of each: {parts}"
+    noise = (
+        f"Across builds over rerun noise, {n} reference and {m} candidate runs: {parts}"
+    )
     odds = f"1 in {round(1 / r['chance']):,}"
     if r["verdict"] == "same":
         verdict = (
@@ -637,7 +623,7 @@ def render(r: dict) -> str:
         verdict = (
             f"Undecided: the builds differ, {times(r['score'])} against the "
             f"{times(r['needed'])} needed, but identical builds read this way "
-            f"{odds} times; record {next_stage(n)} runs of each to settle it"
+            f"{odds} times; the next stage takes {next_stage(n, m)}"
         )
     lines = [first, noise, verdict]
     if r["verdict"] != "same" and "where" in r:
@@ -674,9 +660,10 @@ def located(w: dict) -> list[str]:
     return lines
 
 
-def next_stage(n: int) -> int:
-    """The number of runs of each build to have next."""
-    return next((s for s in STAGES if s > n), MAX_RUNS)
+def next_stage(n: int, m: int) -> str:
+    """The runs to have next, with n of the reference and m of the candidate."""
+    refs, cands = next((s for s in STAGES if s[1] > m), STAGES[-1])
+    return f"{max(n, refs)} reference and {cands} candidate runs"
 
 
 def jsonable(x):
@@ -726,8 +713,7 @@ def command(args: argparse.Namespace) -> None:
         return
     refs = [load(p) for p in args.reference]
     cands = [load(p) for p in args.candidate]
-    # With fewer candidate runs than reference runs, compare as many of each.
-    result = compare(refs[: len(cands)], cands)
+    result = compare(refs, cands)
     print(render(result))
     if args.json:
         args.json.write_text(json.dumps(jsonable(result), indent=2) + "\n")

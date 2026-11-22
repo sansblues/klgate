@@ -5,8 +5,12 @@ two more sets of bugs were picked by rules written before any of them was replay
 with a prediction. This file keeps those rules, the predictions and every result, misses
 included.
 
-Of the 8 that could be scored, 6 were caught. #41873 was predicted not to trigger under
-klgate's workload, and #64279 struck only 3 of its 5 buggy runs.
+Of the 8 that could be scored, 6 were caught with the 5 runs of each build they were
+replayed with. #41873 was predicted not to trigger under klgate's workload, and #64279
+struck only 3 of its 5 buggy runs.
+
+klgate has since moved to stages that start from one run of the candidate. Those find 5 of
+the 8: #41574, the weakest catch, is lost. The results below stand as they were first read.
 
 ## Set 1
 
