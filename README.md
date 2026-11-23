@@ -132,10 +132,10 @@ for 8 of the 10 found, and 92 to 98 % of the time for #30915 and #36580. Those t
 traffic alone, and now and then the first candidate run's probes match one reference run's
 bit for bit and not the other's, which makes that other run look like the odd one.
 
-Two misses separate when all 5 runs of each build are compared, but not from the
-candidate's first run, so a staged check stops before seeing them: #41574, whose model's
-reruns disagree a thousand times more than usual, and #53877, where one of the 5 reference
-runs sits farther from the other four than the bug moves the candidate.
+Two misses come close: #41574 scores 1.37× against the 1.40× needed, because its model's
+reruns disagree a thousand times more than usual, and #53877 scores 2.87× against 3.14×,
+because one of its 5 reference runs sits farther from the other four than the bug moves
+the candidate.
 
 Of the others, #32118 needs memory pressure this workload doesn't create, #41873 doesn't
 trigger under it, and #64279 struck only 3 of the 5 buggy runs. #67789 needs a chunked
