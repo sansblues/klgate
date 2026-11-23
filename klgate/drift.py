@@ -45,8 +45,8 @@ WIKI_URL = (
 WIKI_MEMBER = "wikitext-2-raw/wiki.test.raw"
 WIKI_SHA = "173c87a53759e0201f33e0ccf978e510c2042d7f2cb78229d9a50d79b9e7dd08"
 # Reference and candidate runs after which the builds are compared.
-STAGES = ((2, 1), (4, 2), (10, 4))
-CHANCE = 1e-3  # how often identical builds may read as changed
+STAGES = ((2, 1), (4, 2), (5, 4))
+CHANCE = 1e-2  # how often identical builds may read as changed
 TAIL_FLOOR = 1e-9
 FORMAT = 3
 

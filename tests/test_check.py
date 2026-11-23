@@ -49,29 +49,29 @@ def test_a_change_takes_every_stage(fake, tmp_path):
     result = check.check("reference", "candidate", "m", [], {}, tmp_path)
     assert (result["verdict"], result["runs"], fake["launches"]) == (
         "changed",
-        (10, 4),
-        14,
+        (5, 4),
+        9,
     )
-    assert 1 / result["splits"] == 1 / math.comb(14, 4) <= drift.CHANCE
+    assert 1 / result["splits"] == 1 / math.comb(9, 4) <= drift.CHANCE
     # The candidate's runs lie between the reference's.
-    assert "".join(name[0] for name in fake["order"]) == "rcrrcrrrcrrcrr"
+    assert "".join(name[0] for name in fake["order"]) == "rcrrcrccr"
 
 
 def test_a_recorded_reference_costs_the_next_candidate_one_launch(fake, tmp_path):
     check.check("reference", "candidate", "m", [], {}, tmp_path, full=True)
-    assert fake["launches"] == 14
+    assert fake["launches"] == 9
     result = check.check("reference", "other", "m", [], {}, tmp_path)
     assert (result["verdict"], result["runs"], fake["launches"]) == (
         "same",
-        (10, 1),
-        15,
+        (5, 1),
+        10,
     )
     fake["shift"] = 0.1
     result = check.check("reference", "shifted", "m", [], {}, tmp_path)
     assert (result["verdict"], result["runs"], fake["launches"]) == (
         "changed",
-        (10, 4),
-        19,
+        (5, 4),
+        14,
     )
 
 
@@ -79,14 +79,14 @@ def test_a_check_resumes_from_the_runs_recorded(fake, tmp_path):
     check.check("reference", "candidate", "m", [], {}, tmp_path)
     assert fake["launches"] == 3
     fake["shift"] = 0.1
-    # The reference holds 2 runs: a changed candidate records the other 8 and its own 4.
+    # The reference holds 2 runs: a changed candidate records the other 3 and its own 4.
     result = check.check("reference", "shifted", "m", [], {}, tmp_path)
     assert (result["verdict"], result["runs"], fake["launches"]) == (
         "changed",
-        (10, 4),
-        15,
+        (5, 4),
+        10,
     )
-    assert "".join(name[0] for name in fake["order"][3:]) == "srsrrrsrrsrr"
+    assert "".join(name[0] for name in fake["order"][3:]) == "srsrssr"
 
 
 def test_the_exit_code_is_the_verdict(fake, tmp_path, monkeypatch, capsys):

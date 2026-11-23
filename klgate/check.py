@@ -3,7 +3,7 @@
 Installs both builds, then records runs of each, every run on a fresh server with empty
 caches, and compares them with klgate.drift. It starts with 2 runs of the reference and 1
 of the candidate and records more only while the builds differ, so builds that are the
-same cost 3 server launches and a change costs 14. The reference's runs are kept: the next
+same cost 3 server launches and a change costs 9. The reference's runs are kept: the next
 candidate compared with it starts with 1 launch.
 """
 

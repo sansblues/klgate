@@ -41,12 +41,12 @@ uv run klgate check 124fac10 e9499996 --model Qwen/Qwen3-0.6B \
 ```
 
 On a laptop's RTX 3050 Ti, under WSL, which also needs `--env VLLM_USE_V2_MODEL_RUNNER=0`, it
-compared 14 runs and printed:
+compared 9 runs and printed:
 
 ```text
 First runs: probe KL 0.001111, NLL -0.036 %, same top token 97.99 %, 48.0 % of outputs differ
-Across builds over rerun noise, 10 reference and 4 candidate runs: probes ∞×, decode ∞×, traffic 1.17×
-Verdict: CHANGED, ∞× is above the 2.98× needed; identical builds read this way 1 in 1,001 times
+Across builds over rerun noise, 5 reference and 4 candidate runs: probes ∞×, decode ∞×, traffic 1.13×
+Verdict: CHANGED, ∞× is above the 3.20× needed; identical builds read this way 1 in 126 times
 Where: probes, 32 of 32 chunks differ more across builds than between reruns; most, chunk 21, at position 404 (token ids, probabilities)
   reference: 22235 (0.546), 6755 (0.147), 6569 (0.026)
   candidate: 22235 (0.463), 6755 (0.181), 6569 (0.032)
@@ -63,17 +63,18 @@ result to a file.
 ### What it costs
 
 Every run needs a fresh server, so the cost is server launches, about two minutes each for
-a small model:
+a small model on a datacenter GPU:
 
-| The builds | Launches | With the reference's 10 runs recorded before |
-|---|---|---|
-| read the same | 3, sometimes 6 | 1, sometimes 2 |
-| changed | 14 | 4 |
+| The builds | Launches |
+|---|---|
+| read the same | 3, sometimes 6: about 4 on average |
+| changed | 9 |
 
 klgate starts with 2 runs of the reference and 1 of the candidate, and records more only
-while they differ. Runs are kept in `runs/`, so a reference build is recorded once however
-many candidates you compare with it, and an interrupted check resumes. `--full` records
-all 14 whatever the first runs read, for a change the first candidate run happens to hide.
+while they differ. Runs are kept in `runs/`, so an interrupted check resumes, and a
+reference recorded for one candidate counts for the next on the same machine. `--full`
+records all 9 whatever the first runs read, for a change the first candidate run happens
+to hide.
 
 Commits install from vLLM's per-commit wheels into `~/.cache/klgate/builds`, about 9 GB
 each. A commit without a wheel, such as a pull request's, installs from the nearest earlier
@@ -103,13 +104,12 @@ rule out chance:
 | Reference runs | Candidate runs | Identical builds differ | Then |
 |---|---|---|---|
 | 2 | 1 | 1 time in 3 | same: stop. Differ: 3 more |
-| 4 | 2 | 1 time in 15 | same: stop. Differ: 8 more |
-| 10 | 4 | 1 time in 1,001 | same, or CHANGED |
+| 4 | 2 | 1 time in 15 | same: stop. Differ: 3 more |
+| 5 | 4 | 1 time in 126 | same, or CHANGED |
 
-So identical builds read CHANGED less than once in 1,000 checks, on any model, settings or
-GPU, and a "same" says how large a change would have been caught. The reference takes most
-of the runs because they are kept: a candidate compared with all 10 costs 1, 2 and 4
-launches at the three stages.
+So identical builds read CHANGED less than once in 100 checks, on any model, settings or
+GPU, and a "same" says how large a change would have been caught. Most builds checked are
+the same, so most checks stop after 3 or 6 launches.
 
 ## Does it work
 
@@ -120,12 +120,11 @@ launches at the three stages.
 | 7 known bugs, used to design klgate | 5 found |
 | 8 bugs it never saw, picked by a rule fixed beforehand ([how](bench/unseen.md)) | 5 found |
 | 1 bug raised in vLLM's [RFC #61698](https://github.com/vllm-project/vllm/issues/61698) as out of reach, on 2 models | missed |
-| 8 replays of 2 commit pairs with identical engine code, on 4 kinds of GPU | no false alarm, 3.7 launches each |
+| 8 replays of 2 commit pairs with identical engine code, on 4 kinds of GPU | no false alarm, 3.6 launches each |
 
-Most replays hold 5 runs of each build, from before these stages. They are decided again
-from their saved KLs, with 5 reference and 4 candidate runs at the last stage, where
-identical builds differ 1 time in 126. The two recorded since, on the laptop, hold all 14
-runs: #42379 read CHANGED, and an identical-code pair read the same.
+Each replay holds at least 5 runs of the reference and 4 of the candidate, so every one is
+decided with all the runs a check would use. Some of the earlier ones were recorded before the decode requests were
+added, and are decided on probes and traffic alone.
 
 For each replay the table also says what a check costs on average, over every choice of the
 runs it might have recorded, and how often it would have flagged the change: every time
@@ -133,10 +132,10 @@ for 8 of the 10 found, and 92 to 98 % of the time for #30915 and #36580. Those t
 traffic alone, and now and then the first candidate run's probes match one reference run's
 bit for bit and not the other's, which makes that other run look like the odd one.
 
-Two of the misses were caught by an earlier design that compared 5 runs of each build, and
-aren't found from one candidate run: #41574, whose model's reruns disagree a thousand times
-more than usual, and #53877, where one of the 5 reference runs sits farther from the other
-four than the bug moves the candidate.
+Two misses separate when all 5 runs of each build are compared, but not from the
+candidate's first run, so a staged check stops before seeing them: #41574, whose model's
+reruns disagree a thousand times more than usual, and #53877, where one of the 5 reference
+runs sits farther from the other four than the bug moves the candidate.
 
 Of the others, #32118 needs memory pressure this workload doesn't create, #41873 doesn't
 trigger under it, and #64279 struck only 3 of the 5 buggy runs. #67789 needs a chunked
@@ -154,7 +153,7 @@ To replay one: `uv run klgate bench bench/entries/<id>.toml`.
   then says how large it is and where it shows most.
 - It misses a change smaller than the one needed, and a bug that strikes too few runs.
 - A reference run that landed apart from the others, by however little, can hide a change
-  from the first candidate runs. `--full` compares all 14 runs, which outweigh it.
+  from the first candidate runs. `--full` compares all 9 runs, which outweigh it.
 - It compares probabilities, so a build that only cuts outputs short reads the same.
 - It compares two builds serving one configuration, so a pull request that adds a
   configuration, such as a new KV cache dtype, has nothing to be compared with.

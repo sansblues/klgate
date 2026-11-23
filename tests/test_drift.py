@@ -64,7 +64,7 @@ def world(rng) -> tuple[np.ndarray, np.ndarray]:
     return rng.normal(size=(8, 16, 32)), rng.normal(size=(8, 6, 32))
 
 
-REF, CAND = range(10), range(10, 14)
+REF, CAND = range(5), range(5, 9)
 
 
 def test_a_consistent_shift_is_flagged_by_the_probes():
@@ -74,13 +74,13 @@ def test_a_consistent_shift_is_flagged_by_the_probes():
     shifted[..., 0] -= 0.5  # the text's own tokens get less likely
     refs, cands = reruns(rng, probes, traffic, REF), reruns(rng, shifted, traffic, CAND)
     result = drift.compare(refs, cands)
-    assert (result["verdict"], result["splits"]) == ("changed", math.comb(14, 4))
+    assert (result["verdict"], result["splits"]) == ("changed", math.comb(9, 4))
     assert result["ratios"]["probes"] > 10 and result["score"] > result["needed"]
     assert result["stats"]["same_top"] < 1 and result["stats"]["nll_change"] > 0.01
     text = drift.render(result)
-    assert "Verdict: CHANGED" in text and "1 in 1,001" in text and "NLL +" in text
-    # Fewer runs see the change too, but can't rule out chance: 1 in 1,000 at most.
-    for n, m in (*drift.STAGES[:-1], (10, 3)):
+    assert "Verdict: CHANGED" in text and "1 in 126" in text and "NLL +" in text
+    # Fewer runs see the change too, but can't rule out chance: 1 in 100 at most.
+    for n, m in (*drift.STAGES[:-1], (5, 3)):
         assert drift.compare(refs[:n], cands[:m])["verdict"] == "more"
     assert "the next stage takes 4 reference and 2 candidate" in drift.render(
         drift.compare(refs[:2], cands[:1])
@@ -149,10 +149,10 @@ def test_compare_rejects_runs_it_cannot_compare():
     def with_meta(run: dict, **changes) -> dict:
         return run | {"meta": run["meta"] | changes}
 
-    needs = "record 2 to 10 runs of the reference and fewer of the candidate"
+    needs = "record 2 to 5 runs of the reference and fewer of the candidate"
     with pytest.raises(ValueError, match=f"4 reference and 4 candidate runs: {needs}"):
         drift.compare(refs[:4], cands)
-    with pytest.raises(ValueError, match=f"11 reference and 4 candidate runs: {needs}"):
+    with pytest.raises(ValueError, match=f"6 reference and 4 candidate runs: {needs}"):
         drift.compare([*refs, *reruns(rng, probes, traffic, [20])], cands)
     with pytest.raises(ValueError, match="differ in gpu"):
         drift.compare(refs, [*cands[:3], with_meta(cands[3], gpu="other")])

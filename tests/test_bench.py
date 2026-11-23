@@ -18,16 +18,16 @@ def test_the_bench_reads_as_the_readme_says():
     assert len(known) == 5 and len(unseen) == 5 and not same
 
 
-def test_a_staged_check_costs_3_launches_or_14():
+def test_a_staged_check_costs_3_launches_or_9():
     rng = np.random.default_rng(0)
-    same = {"probes": 1 + rng.random((14, 14))}
+    same = {"probes": 1 + rng.random((9, 9))}
     changed = {"probes": same["probes"].copy()}
-    changed["probes"][:10, 10:] += 9
-    assert bench.staged(changed, 10) == (1.0, 14.0)
-    found, launches = bench.staged(same, 10)
-    assert found < 0.01 and 3 <= launches < 6
-    # A replay from before the stages, 5 runs of each build: the last stage compares
-    # the 5 + 4 there are and still costs 14.
-    old = {"probes": 1 + rng.random((10, 10))}
-    old["probes"][:5, 5:] += 9
-    assert bench.staged(old, 5) == (1.0, 14.0)
+    changed["probes"][:5, 5:] += 9
+    assert bench.staged(changed, 5) == (1.0, 9.0)
+    found, launches = bench.staged(same, 5)
+    assert found < 0.02 and 3 <= launches < 6
+    # A replay with more runs than the stages ask for: they decide on as many as they
+    # ask for, and cost that.
+    big = {"probes": 1 + rng.random((14, 14))}
+    big["probes"][:10, 10:] += 9
+    assert bench.staged(big, 10) == (1.0, 9.0)
